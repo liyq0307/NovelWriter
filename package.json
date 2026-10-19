@@ -1,0 +1,20 @@
+{
+  "name": "novelwriter",
+  "version": "0.1.0",
+  "private": true,
+  "description": "NovelWriter — 人管控、AI管写的本地小说创作平台（架构 · 世界 · 写作）",
+  "type": "module",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "dev:server": "npm --prefix server run dev",
+    "dev:client": "npm --prefix client run dev",
+    "smoke": "node scripts/smoke.mjs",
+    "ui:check": "node scripts/ui-check.mjs",
+    "build": "npm --prefix client run build",
+    "typecheck": "npm --prefix client run typecheck",
+    "start": "npm --prefix server start"
+  },
+  "devDependencies": {
+    "puppeteer-core": "^25.14.0"
+  }
+}

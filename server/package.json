@@ -1,0 +1,14 @@
+{
+  "name": "novelwriter-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "NovelWriter 服务端：Express + node:sqlite，零原生依赖",
+  "scripts": {
+    "dev": "node --watch src/index.js",
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "express": "^5.1.0"
+  }
+}
