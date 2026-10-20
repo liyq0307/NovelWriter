@@ -133,6 +133,80 @@ export interface Stats {
 
 export type ProjectStatus = 'idea' | 'direction' | 'building' | 'planned' | 'writing' | 'done';
 
+export interface Fact {
+  id: number;
+  project_id: number;
+  kind: string;
+  subject: string;
+  fact: string;
+  chapter_idx: number | null;
+  status: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DeconstructionRule {
+  kind: 'style' | 'anti_ai';
+  name: string;
+  content: string;
+}
+
+export interface DeconstructionResult {
+  summary: string;
+  structure: { pattern: string; beats: string[] };
+  characters: { name: string; role: string; want: string; flaw: string; arc: string }[];
+  style: {
+    pov: string;
+    tone: string;
+    sentence: string;
+    dialogue: string;
+    description: string;
+    pacing: string;
+    signature: string[];
+  };
+  techniques: string[];
+  rules: DeconstructionRule[];
+}
+
+export interface Deconstruction {
+  id: number;
+  project_id: number;
+  title: string;
+  chapter_count: number;
+  word_count: number;
+  chapters: { idx: number; title: string; words: number }[];
+  result: DeconstructionResult | null;
+  status: 'analyzing' | 'done' | 'error';
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PromptTemplate {
+  step: string;
+  label: string;
+  desc: string;
+  system: string;
+  suffix: string;
+  overridden: boolean;
+  global: boolean;
+  updated_at: string | null;
+}
+
+export interface PromptTemplateVersion {
+  id: number;
+  system: string;
+  suffix: string;
+  created_at: string;
+}
+
+export interface SearchHit {
+  kind: 'world' | 'character' | 'chapter' | 'fact' | 'thread';
+  refId: number;
+  title: string;
+  snippet: string;
+}
+
 export interface Project {
   id: number;
   title: string;
@@ -151,10 +225,11 @@ export interface Project {
   characters: Character[];
   relations: Relation[];
   threads: Thread[];
+  facts: Fact[];
   word_total: number;
 }
 
-export interface ProjectSummary extends Omit<Project, 'volumes' | 'chapters' | 'world' | 'characters' | 'relations' | 'threads'> {
+export interface ProjectSummary extends Omit<Project, 'volumes' | 'chapters' | 'world' | 'characters' | 'relations' | 'threads' | 'facts'> {
   chapters_total: number;
   chapters_done: number;
   word_total: number;

@@ -129,10 +129,13 @@ export const STEP_NAMES: Record<string, string> = {
   write: '正文生成',
   continue: '衔接续写',
   rewrite: '局部改写',
+  flavor_rewrite: '去AI味改写',
   review: '章节检查',
+  revise: '按意见修文',
   state_sync: '状态同步',
   post_write: '写后整理',
   thread_extract: '线索补录',
+  deconstruct: '拆书分析',
   test: '连接测试',
 };
 

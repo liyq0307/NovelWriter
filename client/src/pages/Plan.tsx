@@ -119,7 +119,7 @@ export default function Plan() {
                         <td><span className="row" style={{ gap: 6 }}><span className={`dot ${c.status}`} />{c.status === 'planned' ? '待写' : c.status === 'draft' ? '草稿' : '完成'}</span></td>
                         <td>
                           <span className="row" style={{ gap: 2 }}>
-                            <Link className="btn ghost small" to={`write/${c.id}`}>写作</Link>
+                            <Link className="btn ghost small" to={`/p/${project.id}/write/${c.id}`}>写作</Link>
                             <button className="btn ghost small" onClick={() => setEditing({ id: c.id, idx: c.idx, title: c.title, brief: c.brief, scenes: c.scenes, cast: (c.cast || []).join('、'), hook: c.hook, volumeId: c.volume_id })}>编辑</button>
                             <ConfirmButton
                               className="btn ghost small"
@@ -150,7 +150,7 @@ export default function Plan() {
                   <td className="muted">第{cnNum(c.idx)}章</td>
                   <td><b>{c.title}</b></td>
                   <td className="muted" style={{ fontSize: 12.5 }}>{c.brief}</td>
-                  <td><Link className="btn ghost small" to={`write/${c.id}`}>写作</Link></td>
+                  <td><Link className="btn ghost small" to={`/p/${project.id}/write/${c.id}`}>写作</Link></td>
                 </tr>
               ))}
             </tbody>

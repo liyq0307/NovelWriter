@@ -141,6 +141,68 @@ CREATE TABLE IF NOT EXISTS threads (
   updated_at      TEXT NOT NULL
 );
 
+-- 事实表：写后从正文抽取的既定事实（时间线、人物、剧情结果），生成与检查时用于防矛盾
+CREATE TABLE IF NOT EXISTS facts (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id  INTEGER NOT NULL,
+  kind        TEXT NOT NULL DEFAULT '剧情',  -- 世界规则 | 时间线 | 人物 | 剧情
+  subject     TEXT NOT NULL DEFAULT '',       -- 主体：人名 / 地名 / 事件名
+  fact        TEXT NOT NULL,
+  chapter_idx INTEGER,
+  status      TEXT NOT NULL DEFAULT 'active', -- active | retracted
+  created_at  TEXT NOT NULL,
+  updated_at  TEXT NOT NULL
+);
+
+-- 拆书：导入参考作品，自动分章并拆解结构 / 人物 / 写法
+CREATE TABLE IF NOT EXISTS deconstructions (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id    INTEGER NOT NULL,
+  title         TEXT NOT NULL DEFAULT '',
+  chapter_count INTEGER NOT NULL DEFAULT 0,
+  word_count    INTEGER NOT NULL DEFAULT 0,
+  chapters      TEXT NOT NULL DEFAULT '[]',     -- [{idx,title,words}]，不含全文
+  source        TEXT NOT NULL DEFAULT '',       -- 导入的原文（截断保存，供复核）
+  result        TEXT,                           -- AI 拆解结果 JSON
+  status        TEXT NOT NULL DEFAULT 'analyzing', -- analyzing | done | error
+  error         TEXT,
+  created_at    TEXT NOT NULL,
+  updated_at    TEXT NOT NULL
+);
+
+-- 提示词模板：按项目覆盖某一步的系统提示词 / 追加要求
+CREATE TABLE IF NOT EXISTS prompt_templates (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id INTEGER NOT NULL DEFAULT 0,        -- 0 = 全局
+  step       TEXT NOT NULL,
+  system     TEXT NOT NULL DEFAULT '',          -- 空 = 使用内置系统提示词
+  suffix     TEXT NOT NULL DEFAULT '',          -- 追加到用户提示词末尾
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(project_id, step)
+);
+
+-- 提示词模板历史版本，用于回滚
+CREATE TABLE IF NOT EXISTS prompt_template_history (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  template_id INTEGER NOT NULL,
+  project_id  INTEGER NOT NULL DEFAULT 0,
+  step        TEXT NOT NULL,
+  system      TEXT NOT NULL DEFAULT '',
+  suffix      TEXT NOT NULL DEFAULT '',
+  created_at  TEXT NOT NULL
+);
+
+-- 全文检索：资料索引（FTS5 不可用时降级为 LIKE）
+CREATE TABLE IF NOT EXISTS search_docs (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id INTEGER NOT NULL,
+  kind       TEXT NOT NULL,                     -- world | character | chapter | fact | thread
+  ref_id     INTEGER NOT NULL,
+  title      TEXT NOT NULL DEFAULT '',
+  body       TEXT NOT NULL DEFAULT ''
+);
+
 -- 每日写作字数（按项目），用于码字统计与连续写作天数
 CREATE TABLE IF NOT EXISTS writing_log (
   project_id INTEGER NOT NULL,
@@ -176,7 +238,11 @@ CREATE INDEX IF NOT EXISTS idx_calls_chapter   ON ai_calls(chapter_id);
 CREATE INDEX IF NOT EXISTS idx_rev_chapter     ON chapter_revisions(chapter_id);
 CREATE INDEX IF NOT EXISTS idx_threads_project ON threads(project_id);
 CREATE INDEX IF NOT EXISTS idx_batches_project ON batches(project_id);
+CREATE INDEX IF NOT EXISTS idx_facts_project   ON facts(project_id);
 CREATE INDEX IF NOT EXISTS idx_log_day         ON writing_log(day);
+CREATE INDEX IF NOT EXISTS idx_decon_project   ON deconstructions(project_id);
+CREATE INDEX IF NOT EXISTS idx_prompt_project  ON prompt_templates(project_id);
+CREATE INDEX IF NOT EXISTS idx_search_doc_proj ON search_docs(project_id);
 `);
 
 export const now = () => new Date().toISOString();

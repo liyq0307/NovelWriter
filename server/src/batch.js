@@ -9,8 +9,12 @@ import * as P from './prompts.js';
 import * as M from './mock.js';
 import { sseFrame, countWords } from './util.js';
 import {
-  chapterContext, chapterTarget, mockCtx, saveChapterContent, reviewChapter,
+  chapterContext, chapterTarget, mockCtx, saveChapterContent, reviewChapter, reviseChapter,
 } from './pipeline.js';
+import { getFlavorConfig, scanFlavor } from './flavor.js';
+
+/** 检查低于该分数时触发一次自动修文 */
+const REVIEW_RETRY_SCORE = 55;
 
 /** batchId -> 运行时状态 */
 const jobs = new Map();
@@ -222,13 +226,45 @@ async function runBatch(id) {
 
       const fresh = get('SELECT * FROM chapters WHERE id = ?', ch.id);
       let reviewScore = null;
+      let revised = false;
       if (b.review === 1 && fresh) {
         try {
           const rv = await reviewChapter(p, { ...fresh, cast: parseField(fresh.cast_names, []), review: null });
           reviewScore = rv.score;
+          if (reviewScore < REVIEW_RETRY_SCORE && fresh.content) {
+            emit(rt, 'warning', { chapterId: ch.id, message: `第 ${ch.idx} 章检查 ${reviewScore} 分，正在按问题自动修文…` });
+            try {
+              const fixed = await reviseChapter(p, fresh, rv, ctx);
+              await saveChapterContent(p, ch, fixed, { reason: 'batch-revise', sync: false, forceSnapshot: true });
+              revised = true;
+              const again = get('SELECT * FROM chapters WHERE id = ?', ch.id);
+              if (again) {
+                const rv2 = await reviewChapter(p, { ...again, cast: parseField(again.cast_names, []), review: null });
+                reviewScore = rv2.score;
+              }
+              emit(rt, 'warning', { chapterId: ch.id, message: `第 ${ch.idx} 章已自动修文，复检 ${reviewScore} 分` });
+            } catch (e) {
+              emit(rt, 'warning', { chapterId: ch.id, message: `第 ${ch.idx} 章自动修文失败，保留原稿：${e.message || e}` });
+            }
+          }
         } catch (e) {
           emit(rt, 'warning', { chapterId: ch.id, message: `第 ${ch.idx} 章检查失败：${e.message || e}` });
         }
+      }
+
+      // 去AI味巡检：只在拦截级别提醒，不自动改写，避免连写中断
+      let flavorScore = null;
+      const finalRow = get('SELECT content, word_count FROM chapters WHERE id = ?', ch.id);
+      if (finalRow?.content) {
+        try {
+          const fv = await scanFlavor(finalRow.content, {
+            config: getFlavorConfig(), projectId: p.id, chapterId: ch.id,
+          });
+          flavorScore = fv.score;
+          if (fv.level === 'block') {
+            emit(rt, 'warning', { chapterId: ch.id, message: `第 ${ch.idx} 章 AI 腔指数 ${fv.score}，建议到「去AI味」页处理` });
+          }
+        } catch { /* 巡检失败不影响连写 */ }
       }
 
       const after = batchRow(id);
@@ -243,11 +279,13 @@ async function runBatch(id) {
         chapterId: ch.id,
         idx: ch.idx,
         title: ch.title,
-        wordCount: saved.wordCount,
+        wordCount: finalRow?.word_count || saved.wordCount,
         summary: saved.summary || '',
         synced: saved.synced?.length || 0,
         reviewScore,
-        totalWords: countWords(text),
+        flavorScore,
+        revised,
+        totalWords: finalRow ? countWords(finalRow.content) : countWords(text),
       });
       emit(rt, 'batch', batchSummary(id));
     }

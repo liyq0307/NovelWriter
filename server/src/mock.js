@@ -31,39 +31,43 @@ const HOOKS = [
 const coreOf = (p) => clip((p.premise || '').replace(/\s+/g, ' '), 24) || '那个没有名字的执念';
 
 /* ---------- 开书方向 ---------- */
-export function directions(p) {
+export function directions(p, guide = {}) {
   const core = coreOf(p);
   const form = p.type === 'short' ? '短篇' : '长篇';
+  const tag = guide.genre ? `${guide.genre}·` : '';
+  /* 作者在构思向导里定下的硬约束，Mock 也照此体现 */
+  const povOf = (fallback) => guide.pov || fallback;
+  const toneOf = (fallback) => guide.tone || fallback;
   const list = [
     {
       title: `${clip(core, 6)}·燎原`,
-      genre: '玄幻·热血',
+      genre: `${tag}玄幻·热血`,
       logline: `围绕「${core}」，一个被所有人放弃的少年，在绝境里点燃了自己的道。`,
       sellingPoints: ['层层反转的攀升线', '克制的羁绊描写', '每卷一个里程碑式高潮'],
       protagonist: '外冷内燃的少年，核心欲望是「证明自己配得上被留下」，阻力是出身与旧案的层层围剿。',
       style: '冷叙事包裹热血内核，短句推进，动作场面干净利落。',
       audience: '18-30 岁男频读者',
-      contract: { pov: '第三人称限制视角（跟随主角）', tone: '克制、凌厉、偶尔温柔', taboos: ['不写无意义卖萌', '不滥用回忆杀'], arc: '从被驱逐的弃子，到守夜人执灯者。' },
+      contract: { pov: povOf('第三人称限制视角（跟随主角）'), tone: toneOf('克制、凌厉、偶尔温柔'), taboos: ['不写无意义卖萌', '不滥用回忆杀'], arc: '从被驱逐的弃子，到守夜人执灯者。' },
     },
     {
       title: `${clip(core, 6)}·回声`,
-      genre: '悬疑·都市传说',
+      genre: `${tag}悬疑·都市传说`,
       logline: `「${core}」背后牵出一桩三年前的旧案，追查到最后，发现拼图缺失的那块是自己。`,
       sellingPoints: ['双线叙事逐步合流', '每章一个可回溯的伏笔', '真相反转在最后一刻'],
       protagonist: '理性的调查者，核心欲望是「补全真相」，阻力是记忆本身就被人为篡改。',
       style: '冷静白描，信息密度高，靠细节而非形容词制造寒意。',
       audience: '20-35 岁悬疑推理读者',
-      contract: { pov: '第一人称不可靠叙事', tone: '冷静、压抑、暗流涌动', taboos: ['不提前剧透关键线索', '不用超自然解释兜底'], arc: '从旁观者到当事人，真相揭晓即身份揭晓。' },
+      contract: { pov: povOf('第一人称不可靠叙事'), tone: toneOf('冷静、压抑、暗流涌动'), taboos: ['不提前剧透关键线索', '不用超自然解释兜底'], arc: '从旁观者到当事人，真相揭晓即身份揭晓。' },
     },
     {
       title: `${clip(core, 6)}·拾光`,
-      genre: '现实·温情成长',
+      genre: `${tag}现实·温情成长`,
       logline: `${form}故事：一场与「${core}」有关的告别之后，几个普通人替彼此撑过了最难的一年。`,
       sellingPoints: ['生活流细节扎实', '群像各有弧光', '后劲极大的克制抒情'],
       protagonist: '笨拙而善良的普通人，核心欲望是「留住即将消失的东西」，阻力是时间与各自的怯懦。',
       style: '平实温润，多用生活细节与对话，煽情点到即止。',
       audience: '全年龄通吃，偏好治愈系读者',
-      contract: { pov: '第三人称多视角轮转', tone: '温暖、克制、微苦回甘', taboos: ['不写狗血冲突', '不用巧合推进主线'], arc: '从各自离散，到彼此成为归处。' },
+      contract: { pov: povOf('第三人称多视角轮转'), tone: toneOf('温暖、克制、微苦回甘'), taboos: ['不写狗血冲突', '不用巧合推进主线'], arc: '从各自离散，到彼此成为归处。' },
     },
   ];
   return JSON.stringify(list, null, 2);
@@ -239,6 +243,56 @@ export function extractThreads(c) {
     { name: `${pick(PLACES, seed)}的约定`, kind: '承诺', detail: '人物之间给出一个尚未兑现的承诺，后续需要回应。' },
   ];
   return JSON.stringify(list, null, 2);
+}
+
+/* ---------- 拆书分析 ---------- */
+export function deconstruct(title, stats) {
+  const seed = seedOf('dec:' + title);
+  const [a, b, c, v] = pickN(NAMES, seed, 4);
+  const obj = {
+    summary: `《${title || '参考作品'}》共 ${stats.chapterCount} 章、约 ${stats.totalWords} 字，平均每章 ${stats.avgChapterWords} 字，对话占比 ${stats.dialogueRatio}%。作品以强情节驱动，靠信息差与阶段性目标维持推进。`,
+    structure: {
+      pattern: '三幕式 + 每卷一个阶段目标',
+      beats: [
+        '开篇 1-3 章：用一个反常事件打破日常，主角被迫入局',
+        '第一次转折：主角获得关键线索，同时付出代价',
+        '中点：旧案与主线合流，敌人从暗处走到台前',
+        '低谷：最信任的人背叛，主角失去核心资源',
+        '高潮：主角用前文埋下的伏笔完成反制',
+        '收束：代价被支付，留下一个克制的开放结尾',
+      ],
+    },
+    characters: [
+      { name: a, role: '主角', want: '查清真相并夺回自己的名字', flaw: '过度相信证据，不肯相信人', arc: '从旁观者变成当事人' },
+      { name: b, role: '伙伴', want: '保住身后的人', flaw: '习惯性隐瞒', arc: '从隐瞒到主动交底' },
+      { name: c, role: '对手', want: '用秩序替代真相', flaw: '把所有人都当棋子', arc: '从冷静到失控' },
+      { name: v, role: '对手', want: '完成一场被阻止的仪式', flaw: '拒绝承认自己的错误', arc: '从幕后走向台前' },
+    ],
+    style: {
+      pov: '第三人称限制视角，紧贴主角',
+      tone: '冷峻、克制，偶尔留一点温度',
+      sentence: '短句为主，动作描写干脆，极少长定语',
+      dialogue: '对话携带信息差，常用一句反问结束交锋',
+      description: '偏好灯光、声音与气味等感官细节，少用视觉形容词堆叠',
+      pacing: '每章一个明确目标，章末必留动作或发现作为钩子',
+      signature: ['用声音写环境', '用物件承载旧事', '以未完成的动作收尾'],
+    },
+    techniques: [
+      '在开篇 200 字内抛出一个不合常理的具体细节',
+      '把设定信息拆进冲突对话，避免整段说明',
+      '关键线索先以无用细节出现，回收时读者才反应过来',
+      '每次推进都让主角失去一样东西，抬高后续代价',
+    ],
+    rules: [
+      { kind: 'style', name: '开篇即反常', content: '每章前 200 字内出现一个具体、反常的细节，让读者产生疑问。' },
+      { kind: 'style', name: '线索前置', content: '关键线索先以看似无关的细节出现，回收时不额外解释。' },
+      { kind: 'style', name: '对话带信息差', content: '每段对话至少让一方隐藏一个信息，通过回避或反问体现。' },
+      { kind: 'style', name: '动作收尾', content: '章节结尾停在未完成的动作或刚被揭示的物品上，不写总结句。' },
+      { kind: 'anti_ai', name: '禁情绪形容词', content: '不写「心中一紧」「瞳孔骤缩」等套话，用身体反应与动作替代。' },
+      { kind: 'anti_ai', name: '禁排比抒情', content: '连续三个以上结构相同的句子必须拆开，情绪只在动作中呈现一次。' },
+    ],
+  };
+  return JSON.stringify(obj, null, 2);
 }
 
 /* ---------- 连接测试 ---------- */

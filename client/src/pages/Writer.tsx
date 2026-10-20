@@ -46,11 +46,20 @@ export default function Writer() {
   const [batch, setBatch] = useState<Batch | null>(null);
   const [batchText, setBatchText] = useState('');
   const [batchErr, setBatchErr] = useState<string | null>(null);
-  const [batchLog, setBatchLog] = useState<{ idx: number; title: string; wordCount: number; reviewScore: number | null; synced: number; skipped?: boolean }[]>([]);
+  const [batchLog, setBatchLog] = useState<{ idx: number; title: string; wordCount: number; reviewScore: number | null; flavorScore?: number | null; revised?: boolean; synced: number; skipped?: boolean }[]>([]);
   const [batchForm, setBatchForm] = useState({ from: 1, to: 1, review: true, sync: true, overwrite: false });
 
   const taRef = useRef<HTMLTextAreaElement>(null);
   const posRef = useRef({ start: 0, end: 0 });
+  /* 章节加载序号：快速切章时丢弃过期响应，避免旧章节内容覆盖新章节 */
+  const loadSeq = useRef(0);
+  /* 当前编辑器快照：离开 / 切章时用来兜底保存还没被防抖落库的正文 */
+  const liveRef = useRef({ id: 0, content: '', saved: '', hold: false });
+  liveRef.current = {
+    id: ch?.id ?? 0, content, saved: ch?.content ?? '',
+    /* 生成 / 连写期间编辑器里的内容由流式结果或后台任务接管，不做兜底保存 */
+    hold: !!streaming || !!batch?.running,
+  };
 
   /* 选中章节：URL 参数或自动选第一章 */
   useEffect(() => {
@@ -61,7 +70,9 @@ export default function Writer() {
 
   const loadChapter = useCallback(async () => {
     if (!chapterId) return;
+    const seq = ++loadSeq.current;
     const c: Chapter = await api.get(`/projects/${pid}/chapters/${chapterId}`);
+    if (seq !== loadSeq.current) return; // 期间已切到别的章节
     setCh(c);
     setContent(c.content || '');
     setSaveState('idle');
@@ -70,8 +81,15 @@ export default function Writer() {
   useEffect(() => {
     let alive = true;
     loadChapter().then(() => { if (alive) { setPreview(null); setNote(null); setErr(null); } }).catch((e) => { if (alive) setErr(e.message); });
-    return () => { alive = false; };
-  }, [loadChapter]);
+    return () => {
+      alive = false;
+      /* 切章或离开写作台时，把还留在防抖窗口里的正文补存一次，避免丢字 */
+      const live = liveRef.current;
+      if (live.id && !live.hold && live.content !== live.saved) {
+        api.put(`/projects/${pid}/chapters/${live.id}/content`, { content: live.content }).catch(() => { /* 兜底保存失败不打断导航 */ });
+      }
+    };
+  }, [loadChapter, pid]);
 
   /* 进入写作台时检查是否有正在进行的连写任务 */
   useEffect(() => {
@@ -575,6 +593,8 @@ export default function Writer() {
                           <span className="muted small">{l.wordCount} 字</span>
                           {l.synced > 0 ? <span className="muted small">状态 {l.synced} 项</span> : null}
                           {l.reviewScore != null ? <Badge tone={l.reviewScore >= 85 ? 'ok' : l.reviewScore >= 70 ? 'warn' : 'accent'}>{l.reviewScore} 分</Badge> : null}
+                          {l.revised ? <Badge tone="accent">已修文</Badge> : null}
+                          {l.flavorScore != null ? <Badge tone={l.flavorScore >= 70 ? 'accent' : l.flavorScore >= 40 ? 'warn' : 'ok'}>AI腔 {l.flavorScore}</Badge> : null}
                         </>
                       )}
                     </div>

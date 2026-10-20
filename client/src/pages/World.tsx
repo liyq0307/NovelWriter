@@ -94,6 +94,40 @@ export default function World() {
         ))
       )}
 
+      {(project.facts?.length ?? 0) > 0 && (
+        <div className="mt16">
+          <div className="row" style={{ marginBottom: 10 }}>
+            <span style={{ fontFamily: 'var(--serif)', fontSize: 16, fontWeight: 600 }}>
+              <span style={{
+                display: 'inline-flex', width: 24, height: 24, borderRadius: 6, background: 'var(--sidebar)',
+                color: '#d8b98a', alignItems: 'center', justifyContent: 'center', fontSize: 12, marginRight: 8, verticalAlign: 'middle',
+              }}>实</span>
+              已确立的事实
+            </span>
+            <span className="muted small">{project.facts.length} 条 · 写后自动抽取，生成与检查时用于防矛盾</span>
+          </div>
+          <div className="grid grid-2">
+            {project.facts.map((f) => (
+              <div key={f.id} className="card" style={{ padding: '14px 16px' }}>
+                <div className="row">
+                  <Badge tone="info">{f.kind}</Badge>
+                  {f.subject ? <b style={{ fontSize: 14 }}>{f.subject}</b> : null}
+                  {f.chapter_idx ? <span className="muted small">第 {f.chapter_idx} 章</span> : null}
+                  <span className="grow" />
+                  <ConfirmButton
+                    className="btn ghost small"
+                    onConfirm={async () => { await api.del(`/projects/${project.id}/facts/${f.id}`); await reload(); }}
+                  >
+                    删除
+                  </ConfirmButton>
+                </div>
+                <p className="muted mt8" style={{ lineHeight: 1.8, fontSize: 13 }}>{f.fact}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {editing && (
         <Modal title={editing.id ? '编辑设定条目' : '新增设定条目'} onClose={() => setEditing(null)}>
           <Field label="分类">

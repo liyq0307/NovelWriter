@@ -11,20 +11,76 @@ import { callAI } from './ai.js';
 import * as P from './prompts.js';
 import * as M from './mock.js';
 import { parseJSONLoose, countWords } from './util.js';
+import { getFlavorConfig } from './flavor.js';
+import { recall } from './search.js';
 
 const chapter = (pid, cid) => get('SELECT * FROM chapters WHERE id = ? AND project_id = ?', Number(cid), Number(pid));
 const touch = (id) => run('UPDATE projects SET updated_at = ? WHERE id = ?', now(), id);
 
 /* ============ 上下文 ============ */
 
+const WORLD_MAX = 12;
+const WORLD_BUDGET = 1800;
+const CHARS_MAX = 8;
+
+/** 从本章任务中抽取用于相关度匹配的词：出场人名 + 任务文本的二字片段 */
+function worldTokens(c) {
+  const tokens = new Set((c.cast || []).filter((n) => n && n.length >= 2));
+  const segs = `${c.title || ''} ${c.brief || ''} ${c.scenes || ''} ${c.hook || ''}`
+    .split(/[^\u4e00-\u9fa5A-Za-z0-9]+/)
+    .filter((s) => s.length >= 2);
+  for (const s of segs) {
+    if (s.length <= 4) {
+      tokens.add(s);
+      continue;
+    }
+    for (let i = 0; i + 2 <= s.length; i++) tokens.add(s.slice(i, i + 2));
+  }
+  return [...tokens];
+}
+
+/**
+ * 按本章任务筛选世界条目：先按相关度打分，再按字符预算截断。
+ * 条目不多时原样返回，避免破坏小项目的完整设定。
+ */
+export function selectWorld(entries, c) {
+  if (entries.length <= WORLD_MAX) return entries;
+  const tokens = worldTokens(c);
+  const scored = entries.map((w, i) => {
+    const hay = `${w.name || ''}${w.category || ''}${w.content || ''}`;
+    let score = 0;
+    for (const t of tokens) if (hay.includes(t)) score += 2;
+    return { w, i, score };
+  });
+  scored.sort((a, b) => b.score - a.score || a.i - b.i);
+  const picked = [];
+  let used = 0;
+  for (const { w, score } of scored) {
+    if (picked.length >= WORLD_MAX) break;
+    // 没有任何相关命中时最多兜底 6 条，避免把无关设定灌进上下文
+    if (!score && picked.length >= 6) break;
+    const cost = Math.min(String(w.content || '').length, 120) + 24;
+    if (picked.length >= 4 && used + cost > WORLD_BUDGET) break;
+    picked.push(w);
+    used += cost;
+  }
+  return picked;
+}
+
 /** 组装本章上下文：世界规则、出场人物、写法规则、前情摘要、伏笔、上一章结尾 */
 export function chapterContext(p, c) {
-  const world = all('SELECT * FROM world_entries WHERE project_id = ?', p.id);
+  const worldAll = all('SELECT * FROM world_entries WHERE project_id = ?', p.id);
   const chars = all('SELECT * FROM characters WHERE project_id = ?', p.id);
   const castSet = new Set(c.cast || []);
   let useChars = chars.filter((ch) => castSet.has(ch.name));
   if (!useChars.length) useChars = chars.filter((ch) => ch.role === '主角' || ch.role === '反派');
   if (!useChars.length) useChars = chars.slice(0, 4);
+  if (useChars.length > CHARS_MAX) useChars = useChars.slice(0, CHARS_MAX);
+  const world = selectWorld(worldAll, c);
+  const flavor = getFlavorConfig();
+  const flavorWords = flavor.wordEnabled
+    ? flavor.rules.filter((r) => r.enabled !== false).slice(0, 24)
+    : [];
   const rules = all(
     'SELECT * FROM style_rules WHERE enabled = 1 AND (project_id IS NULL OR project_id = ?) ORDER BY project_id DESC, id',
     p.id
@@ -44,8 +100,17 @@ export function chapterContext(p, c) {
      ORDER BY last_chapter DESC, id LIMIT 20`,
     p.id
   );
+  const facts = all(
+    "SELECT * FROM facts WHERE project_id = ? AND status = 'active' ORDER BY id DESC LIMIT 30",
+    p.id
+  ).reverse();
+  /* 全文检索召回：按本章任务匹配世界 / 角色 / 摘要 / 事实，补充上下文 */
+  let recalls = [];
+  try {
+    recalls = recall(p.id, `${c.title || ''} ${c.brief || ''} ${c.scenes || ''}`, 5);
+  } catch { /* 检索不可用时不影响写作 */ }
   return {
-    world, useChars, rules, summaries, threads,
+    world, useChars, rules, summaries, threads, flavorWords, facts, recalls,
     prevTitle: prev?.title || null,
     tail: prev?.content ? prev.content.slice(-620) : '',
     allChars: chars,
@@ -102,14 +167,35 @@ export function applyThreadEvents(projectId, chapterIdx, events) {
 
 /* ============ 写后整理 ============ */
 
+const FACT_KINDS = ['世界规则', '时间线', '人物', '剧情'];
+
+/** 把写后抽取的既定事实入库，按正文去重 */
+export function applyFacts(projectId, chapterIdx, items) {
+  let changed = 0;
+  for (const f of Array.isArray(items) ? items : []) {
+    const fact = String(f?.fact || '').trim().slice(0, 300);
+    if (!fact) continue;
+    if (get('SELECT id FROM facts WHERE project_id = ? AND fact = ?', projectId, fact)) continue;
+    const kind = FACT_KINDS.includes(f.kind) ? f.kind : '剧情';
+    const subject = String(f.subject || '').trim().slice(0, 60);
+    const t = now();
+    run(`INSERT INTO facts (project_id, kind, subject, fact, chapter_idx, status, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?)`,
+      projectId, kind, subject, fact, chapterIdx, 'active', t, t);
+    changed++;
+  }
+  return changed;
+}
+
 /**
- * 写后整理：生成章节摘要、同步角色状态、回流伏笔线索。
- * 返回 { updated, summary, threads }
+ * 写后整理：生成章节摘要、同步角色状态、回流伏笔线索、沉淀既定事实。
+ * 返回 { updated, summary, threads, facts }
  */
 export async function postWriteSync(p, c) {
   const chars = all('SELECT * FROM characters WHERE project_id = ?', p.id);
   const threads = all("SELECT * FROM threads WHERE project_id = ? AND status IN ('planted','reinforced')", p.id);
-  const { system, user } = P.postWrite(p, c, chars, threads);
+  const facts = all("SELECT fact FROM facts WHERE project_id = ? AND status = 'active' ORDER BY id DESC LIMIT 40", p.id);
+  const { system, user } = P.postWrite(p, c, chars, threads, facts);
   const out = await callAI({
     task: 'reviewer', step: 'post_write', system, user,
     projectId: p.id, chapterId: c.id,
@@ -134,7 +220,8 @@ export async function postWriteSync(p, c) {
   }
 
   const threadCount = applyThreadEvents(p.id, c.idx, obj.threads);
-  return { updated, summary, threads: threadCount };
+  const factsCount = applyFacts(p.id, c.idx, obj.facts);
+  return { updated, summary, threads: threadCount, facts: factsCount };
 }
 
 /* ============ 章节检查 ============ */
@@ -170,6 +257,24 @@ export async function reviewChapter(p, c) {
   run('UPDATE chapters SET review = ?, updated_at = ? WHERE id = ?', JSON.stringify(normalized), now(), c.id);
   touch(p.id);
   return normalized;
+}
+
+/* ============ 章节修文（检查闭环） ============ */
+
+/** 依据检查问题重写整章：失败或字数异常时抛错，由调用方保留原稿 */
+export async function reviseChapter(p, c, review, ctx = {}) {
+  const { system, user } = P.revise(p, c, review, ctx);
+  const out = await callAI({
+    task: 'writer', step: 'revise', system, user,
+    projectId: p.id, chapterId: c.id,
+    mock: () => c.content || '',
+  });
+  const text = String(out.text || '').trim();
+  if (!text) throw new Error('修文模型没有返回正文');
+  if (String(c.content || '').trim() && countWords(text) < countWords(c.content) * 0.7) {
+    throw new Error('修文结果字数异常，已保留原稿');
+  }
+  return text;
 }
 
 /* ============ 版本快照 ============ */

@@ -12,6 +12,9 @@ import Writer from './Writer';
 import Threads from './Threads';
 import Rules from './Rules';
 import Usage from './Usage';
+import Flavor from './Flavor';
+import Prompts from './Prompts';
+import Deconstruct from './Deconstruct';
 
 interface Ctx {
   project: Project;
@@ -24,16 +27,38 @@ export function useProject(): Ctx {
   return v;
 }
 
-const NAV = [
-  { to: '', label: '概览', num: '一', end: true },
-  { to: 'direction', label: '方向', num: '二' },
-  { to: 'world', label: '世界手册', num: '三' },
-  { to: 'characters', label: '角色库', num: '四' },
-  { to: 'plan', label: '架构规划', num: '五' },
-  { to: 'write', label: '写作台', num: '六' },
-  { to: 'threads', label: '伏笔线索', num: '七' },
-  { to: 'rules', label: '写法规则', num: '八' },
-  { to: 'usage', label: 'AI 用量', num: '九' },
+const NAV_GROUPS = [
+  {
+    label: '创作管线',
+    items: [
+      { to: 'direction', label: '方向' },
+      { to: 'world', label: '世界手册' },
+      { to: 'characters', label: '角色库' },
+      { to: 'plan', label: '架构规划' },
+      { to: 'write', label: '写作台' },
+      { to: 'threads', label: '伏笔线索' },
+    ],
+  },
+  {
+    label: '写作规范',
+    items: [
+      { to: 'rules', label: '写法规则' },
+      { to: 'flavor', label: '去AI味' },
+    ],
+  },
+  {
+    label: '参考与学习',
+    items: [
+      { to: 'deconstruct', label: '拆书' },
+    ],
+  },
+  {
+    label: '系统',
+    items: [
+      { to: 'prompts', label: '提示词模板' },
+      { to: 'usage', label: 'AI 用量' },
+    ],
+  },
 ];
 
 export default function ProjectPage() {
@@ -67,14 +92,21 @@ export default function ProjectPage() {
       <div className="project-shell">
         <nav className="project-nav">
           <div className="nav-group">
-            <div className="nav-label">创作管线</div>
-            {NAV.map((n) => (
-              <NavLink key={n.to} to={n.to === '' ? `/p/${project.id}` : `/p/${project.id}/${n.to}`} end={n.end as boolean}>
-                <span className="nav-num">{n.num}</span>
-                {n.label}
-              </NavLink>
-            ))}
+            <NavLink to={`/p/${project.id}`} end>概览</NavLink>
           </div>
+          {NAV_GROUPS.map((g) => (
+            <div key={g.label} className="nav-group">
+              <div className="nav-label">{g.label}</div>
+              {g.items.map((n) => (
+                <NavLink
+                  key={n.to}
+                  to={n.to === '' ? `/p/${project.id}` : `/p/${project.id}/${n.to}`}
+                >
+                  {n.label}
+                </NavLink>
+              ))}
+            </div>
+          ))}
           <div className="nav-group">
             <div className="nav-label">本书</div>
             <ConfirmButton
@@ -103,8 +135,21 @@ export default function ProjectPage() {
               />
               写后同步角色状态
             </label>
-            <a className="btn small" href={`/api/projects/${project.id}/export?format=md`}>导出 MD</a>
-            <a className="btn small" href={`/api/projects/${project.id}/export?format=txt`}>TXT</a>
+            <details className="dropdown">
+              <summary className="btn small">导出</summary>
+              <div
+                className="dropdown-menu"
+                onClick={(e) => {
+                  const d = e.currentTarget.parentElement as HTMLDetailsElement | null;
+                  if (d) d.open = false;
+                }}
+              >
+                <a href={`/api/projects/${project.id}/export?format=md`}>Markdown（.md）</a>
+                <a href={`/api/projects/${project.id}/export?format=txt`}>纯文本（.txt）</a>
+                <a href={`/api/projects/${project.id}/export?format=docx`}>Word（.docx）</a>
+                <a href={`/api/projects/${project.id}/export?format=epub`}>EPUB（.epub）</a>
+              </div>
+            </details>
           </div>
           <Routes>
             <Route index element={<Overview />} />
@@ -116,7 +161,10 @@ export default function ProjectPage() {
             <Route path="write/:chapterId" element={<Writer />} />
             <Route path="threads" element={<Threads />} />
             <Route path="rules" element={<Rules />} />
+            <Route path="flavor" element={<Flavor />} />
             <Route path="usage" element={<Usage />} />
+            <Route path="prompts" element={<Prompts />} />
+            <Route path="deconstruct" element={<Deconstruct />} />
           </Routes>
         </main>
       </div>

@@ -7,6 +7,7 @@
  */
 import { get, run, now } from './db.js';
 import { countWords } from './util.js';
+import { applyTemplate } from './templates.js';
 
 const DEFAULTS = { provider: 'mock', baseUrl: '', apiKey: '', models: { planner: '', writer: '', reviewer: '' } };
 
@@ -158,6 +159,11 @@ export async function callAI(call) {
   const mock = isMockMode(s);
   if (!mock && !model) {
     throw new Error('尚未配置模型：请在「模型设置」中填写模型名称（可为规划/正文/审阅分别指定）');
+  }
+  /* 项目级提示词模板覆盖（系统提示词替换 / 用户提示词追加） */
+  if (call.projectId && call.step) {
+    const t = applyTemplate(call.step, call.projectId, { system: call.system || '', user: call.user || '' });
+    call = { ...call, system: t.system, user: t.user };
   }
   const t0 = Date.now();
   try {

@@ -9,6 +9,9 @@ import projectsRouter from './routes/projects.js';
 import batchRouter from './routes/batch.js';
 import systemRouter from './routes/system.js';
 import demoRouter from './routes/demo.js';
+import flavorRouter from './routes/flavor.js';
+import deconstructRouter from './routes/deconstruct.js';
+import templatesRouter from './routes/templates.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -30,9 +33,12 @@ app.get('/api/health', (req, res) => {
 
 app.use('/api/projects', batchRouter);
 app.use('/api/projects', writingRouter);
+app.use('/api/projects', deconstructRouter);
+app.use('/api/projects', templatesRouter);
 app.use('/api/projects', projectsRouter);
 app.use('/api', demoRouter);
 app.use('/api', systemRouter);
+app.use('/api', flavorRouter);
 
 /* 生产模式：托管前端构建产物（client/dist） */
 const dist = path.resolve(__dirname, '../../client/dist');

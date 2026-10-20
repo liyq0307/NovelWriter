@@ -28,17 +28,34 @@ const worldDigest = (entries) => (entries || []).map((w) => `- ${w.name}：${cli
 const charDigest = (chars) => (chars || []).map((c) => `- ${c.name}（${c.role}）：${clip(c.profile, 60)}｜目标：${clip(c.goals, 50)}`).join('\n');
 
 /* ============ 1. 开书方向 ============ */
-export function directions(p) {
+export function directions(p, guide = {}) {
   const system = '你是资深小说策划编辑，擅长把一句模糊的灵感打磨成可执行的创作方向。只输出 JSON，不要任何解释或多余文字。';
+  const lines = [];
+  if (guide.genre) lines.push(`题材赛道：${guide.genre}`);
+  if (guide.setting) lines.push(`世界观偏好：${guide.setting}`);
+  if (guide.references) lines.push(`对标作品：${guide.references}`);
+  if (guide.protagonist) lines.push(`主角类型：${guide.protagonist}`);
+  if (guide.pov) lines.push(`叙事视角：${guide.pov}`);
+  if (guide.tone) lines.push(`情绪基调：${guide.tone}`);
+  if (guide.pacing) lines.push(`节奏偏好：${guide.pacing}`);
+  if (guide.audience) lines.push(`目标读者：${guide.audience}`);
+  if (Array.isArray(guide.sellingPoints) && guide.sellingPoints.length) lines.push(`核心爽点：${guide.sellingPoints.join('、')}`);
+  if (guide.mustHave) lines.push(`必须包含：${guide.mustHave}`);
+  if (guide.taboos) lines.push(`明确禁忌：${guide.taboos}`);
+  const guideBlock = lines.length
+    ? `\n【作者补充的创作偏好（必须体现）】\n${lines.join('\n')}\n`
+    : '';
   const user = `作者的一句灵感：
 """
 ${p.premise}
 """
 作品形态：${p.type === 'short' ? '短篇（一次读完、有完整结局）' : '长篇连载（可持续推进几十万字）'}${p.target_words ? `，目标约 ${p.target_words} 字` : ''}
-
+${guideBlock}
 请基于这句灵感给出 3 个差异明显的候选方向：题材赛道、情绪基调、叙事方式至少各有一项不同；每个方向都要有清晰的读者价值与可执行的故事弧线，主角要有具体的核心欲望与阻力。
+作者给出的偏好是硬约束：题材、世界观、主角类型、视角、基调、禁忌必须在候选方向中体现；若与灵感冲突，优先保证灵感的核心冲突成立，再尽量贴合偏好。
+每个方向的 contract 必须写实可执行（pov 要具体到人称与视角范围，taboos 要能直接约束正文），不要写空话。
 
-严格输出 JSON 数组，每个元素字段如下：
+严格输出 JSON 数组：顶层必须是以 [ 开头、] 结尾的数组，包含 3 个元素；不要返回单个对象，不要用 Markdown 代码块包裹。每个元素字段如下：
 {"title":"暂定书名","genre":"题材标签","logline":"一句话故事（60字内）","sellingPoints":["卖点","卖点","卖点"],"protagonist":"主角设定（核心欲望与阻力）","style":"文风与叙事基调","audience":"目标读者","contract":{"pov":"叙事视角","tone":"语言基调","taboos":["要避免的写法"],"arc":"整体故事弧线"}}`;
   return { system, user };
 }
@@ -156,6 +173,21 @@ export function chapterWrite(p, c, ctx) {
       parts.push(`- ${ch.name}（${ch.role}）：${clip(ch.profile, 80)}｜目标：${clip(ch.goals, 60)}${ch.status ? '｜当前状态：' + clip(ch.status, 80) : ''}`);
     }
   }
+  if (ctx.facts?.length) {
+    parts.push('\n【已确立的事实（不得违背）】');
+    for (const f of ctx.facts) parts.push(`- ${f.kind}${f.subject ? '·' + f.subject : ''}：${clip(f.fact, 90)}`);
+  }
+  if (ctx.recalls?.length) {
+    const kindName = { world: '设定', character: '人物', chapter: '前章', fact: '事实', thread: '线索' };
+    const seenTitles = new Set((ctx.world || []).map((w) => w.name));
+    const hitLines = ctx.recalls
+      .filter((h) => !(h.kind === 'world' && seenTitles.has(h.title.split('·').pop())))
+      .map((h) => `- [${kindName[h.kind] || h.kind}] ${h.title}：${clip(h.snippet, 100)}`);
+    if (hitLines.length) {
+      parts.push('\n【资料检索（与本章相关，可补充细节，不得违背）】');
+      parts.push(...hitLines);
+    }
+  }
   const styleRules = (ctx.rules || []).filter((r) => r.kind === 'style');
   const antiRules = (ctx.rules || []).filter((r) => r.kind === 'anti_ai');
   if (styleRules.length) {
@@ -165,6 +197,11 @@ export function chapterWrite(p, c, ctx) {
   if (antiRules.length) {
     parts.push('\n【反AI规则（必须遵守）】');
     for (const r of antiRules) parts.push(`- ${r.name}：${r.content}`);
+  }
+  if (ctx.flavorWords?.length) {
+    parts.push('\n【禁用AI腔表达（生成时就要避开）】');
+    for (const r of ctx.flavorWords) parts.push(`- 「${r.phrase}」→ ${r.suggestion || '改写为具体描写'}`);
+    parts.push('以上表达不得出现在正文中，用具体动作、感官细节或直接陈述替代。');
   }
   if (ctx.threads?.length) {
     parts.push('\n【伏笔与线索（需承接或回收）】');
@@ -200,11 +237,13 @@ export function continueWrite(p, c, before, target, ctx = {}) {
 3. 遵守本书世界规则与人物设定，杜绝AI腔；
 4. 只输出正文，不要任何解释或标记。`;
   const threadLine = (ctx.threads || []).slice(0, 6).map((t) => `${t.name}（${t.kind}）`).join('、');
+  const flavorLine = (ctx.flavorWords || []).slice(0, 16).map((r) => `「${r.phrase}」`).join('、');
   const user = `【作品】
 ${bookBrief(p)}
 
 【本章任务】${c.brief || '（未定）'}${c.hook ? `\n【章末钩子】${c.hook}` : ''}
 ${threadLine ? `\n【可承接的伏笔】${threadLine}` : ''}
+${flavorLine ? `\n【禁用AI腔表达（不得出现）】${flavorLine}` : ''}
 
 【已有正文（断点前片段）】
 ${clip(before, 1200)}
@@ -234,6 +273,58 @@ ${clip(after, 300)}
   return { system, user };
 }
 
+/* ============ 8.5 去AI味：单句改写 ============ */
+export function flavorRewrite(selection, hits, before, after) {
+  const system = `你是中文小说修文师，专门清除「AI 腔」。规则：
+1. 只改写给定片段，不改变情节、人物、信息与叙事视角；
+2. 删掉或替换命中的 AI 腔词，用具体动作、感官与信息差承载情绪；
+3. 句子长短错落，避免排比与万能形容词；
+4. 只输出改写后的正文，不要解释、引号、标记或前后缀。`;
+  const hitLines = (hits || []).map((h) => `- 「${h.phrase}」：${h.reason || ''}${h.suggestion ? `（建议：${h.suggestion}）` : ''}`).join('\n');
+  const user = `【上下文（之前）】
+${clip(before, 200) || '（无）'}
+
+【待改写片段】
+${clip(selection, 1500)}
+
+【上下文（之后）】
+${clip(after, 200) || '（无）'}
+
+【命中的 AI 腔特征】
+${hitLines || '（无具体命中，按整体语感去AI化）'}
+
+请只输出改写后的片段。`;
+  return { system, user };
+}
+
+/* ============ 8.8 按检查结果修文（连写闭环） ============ */
+export function revise(p, c, review, ctx = {}) {
+  const system = `你是小说修文师，负责按责编意见修改现有章节。规则：
+1. 只输出修改后的完整正文，不要解释、不要标注修改处；
+2. 保持情节、人物、场景、信息量与章末钩子不变，不得增删事件；
+3. 优先解决 high / medium 级问题，逐条落实修改建议；
+4. 不得引入新的AI腔，用具体动作与细节替代套话。`;
+  const issues = (review?.issues || []).slice(0, 8);
+  const parts = [];
+  parts.push(`【作品】《${p.title}》`);
+  parts.push(`【本章】第${c.idx}章《${c.title || '未命名'}》`);
+  if (c.brief) parts.push(`【本章任务】${c.brief}${c.hook ? `\n【章末钩子】${c.hook}` : ''}`);
+  if (issues.length) {
+    parts.push('\n【检查发现的问题】');
+    issues.forEach((it, i) => {
+      parts.push(`${i + 1}. [${it.severity}] ${it.type}｜${it.location || '位置未指明'}：${it.problem}${it.suggestion ? `｜建议：${it.suggestion}` : ''}`);
+    });
+  }
+  if (review?.summary) parts.push(`\n【责编总评】${review.summary}`);
+  if (ctx.flavorWords?.length) {
+    parts.push('\n【禁用AI腔表达】');
+    for (const r of ctx.flavorWords.slice(0, 16)) parts.push(`- 「${r.phrase}」→ ${r.suggestion || '改写为具体描写'}`);
+  }
+  parts.push(`\n【原正文】\n${c.content || ''}`);
+  parts.push('\n请输出修改后的完整正文。');
+  return { system, user: parts.join('\n') };
+}
+
 /* ============ 9. 章节检查 ============ */
 export function review(p, c, ctx) {
   const system = '你是严格但讲道理的小说责编，负责章节质检。只输出 JSON，不要多余文字。';
@@ -244,6 +335,10 @@ export function review(p, c, ctx) {
     parts.push('【出场人物与当前状态】');
     for (const ch of ctx.useChars) parts.push(`- ${ch.name}：${clip(ch.status || ch.profile, 80)}`);
   }
+  if (ctx.facts?.length) {
+    parts.push('\n【已确立的事实（用于核对一致性）】');
+    for (const f of ctx.facts.slice(-20)) parts.push(`- ${f.kind}${f.subject ? '·' + f.subject : ''}：${clip(f.fact, 90)}`);
+  }
   parts.push(`\n【正文】\n${c.content || ''}`);
   if (ctx.threads?.length) {
     parts.push('\n【进行中的伏笔与线索】');
@@ -251,7 +346,7 @@ export function review(p, c, ctx) {
   }
   parts.push(`\n请从四个维度检查：
 1. 任务完成度：是否完成本章任务、钩子是否落位；
-2. 一致性：人物言行、世界规则、与前文承接是否矛盾；
+2. 一致性：人物言行、世界规则、与前文及【已确立的事实】是否矛盾；
 3. 文风：是否存在AI腔、句式单一、形容词堆叠；
 4. 节奏与可读性：信息密度、喘息点、钩子力度。
 
@@ -261,19 +356,23 @@ export function review(p, c, ctx) {
   return { system, user: parts.join('\n') };
 }
 
-/* ============ 10. 写后整理：章节摘要 + 角色状态 + 伏笔线索 ============ */
+/* ============ 10. 写后整理：章节摘要 + 角色状态 + 伏笔线索 + 既定事实 ============ */
 /**
- * 一次调用完成三件事，减少连续创作中的重复消耗：
+ * 一次调用完成四件事，减少连续创作中的重复消耗：
  * - 本章摘要：成为后续章节的长期记忆
  * - 角色状态：位置、处境、掌握信息、关系变化
  * - 伏笔线索：新埋、推进、回收、放弃
+ * - 既定事实：死亡/受伤/得失/抵达等硬事实，后续生成不得违背
  */
-export function postWrite(p, c, chars, threads) {
+export function postWrite(p, c, chars, threads, facts = []) {
   const system = '你是小说连载的资料管理员，负责在每章写完后整理可被后续章节直接引用的记忆。只输出 JSON，不要任何解释或多余文字。';
   const charList = (chars || []).map((ch) => `- ${ch.name}（${ch.role}）：${ch.status || '（暂无记录）'}`).join('\n');
   const threadList = (threads || []).length
     ? (threads || []).map((t) => `- ${t.name}（${t.kind}，${t.status}）：${t.detail || '（暂无说明）'}`).join('\n')
     : '（暂无进行中的伏笔）';
+  const factList = (facts || []).length
+    ? (facts || []).map((f) => `- ${f.fact}`).join('\n')
+    : '（暂无）';
   const user = `【作品】《${p.title}》
 【本章】第${c.idx}章《${c.title || '未命名'}》
 【本章任务】${clip(c.brief, 200) || '（未定）'}
@@ -284,16 +383,20 @@ ${charList || '（无角色）'}
 【进行中的伏笔与线索】
 ${threadList}
 
+【已有事实（不要重复记录）】
+${factList}
+
 【本章正文】
 ${clip(c.content, 6000)}
 
-请完成三件事：
+请完成四件事：
 1. 本章摘要：80-120 字，只记录已经发生的事实（谁做了什么、得到/失去了什么、留下什么悬念），供后续章节回顾，不评价文笔。
 2. 角色最新状态：只列本章确实受影响的角色；状态写成可被后续章节直接引用的事实（位置、处境、掌握信息、关系变化、伤势等），80 字内。
 3. 伏笔与线索：new=本章新埋下的，advance=本章推进的，resolve=本章已回收的，drop=本章明确放弃的。已有线索必须沿用原名；没有变化就输出空数组。
+4. 既定事实：只记录本章明确发生、且会影响后续章节的硬事实（死亡、受伤、获得/失去物品、抵达/离开、关系确立、规则生效、关键信息揭示等），一条一句，不写情绪与推测；已在【已有事实】中的不要重复。
 
 输出 JSON：
-{"summary":"本章摘要","characters":[{"name":"角色名","status":"最新状态"}],"threads":[{"name":"线索名","action":"new|advance|resolve|drop","kind":"伏笔|线索|悬念|承诺","detail":"一句话说明"}]}`;
+{"summary":"本章摘要","characters":[{"name":"角色名","status":"最新状态"}],"threads":[{"name":"线索名","action":"new|advance|resolve|drop","kind":"伏笔|线索|悬念|承诺","detail":"一句话说明"}],"facts":[{"kind":"世界规则|时间线|人物|剧情","subject":"主体","fact":"一句话事实"}]}`;
   return { system, user };
 }
 
@@ -311,5 +414,42 @@ ${clip(c.content, 6000)}
 
 输出 JSON 数组：
 [{"name":"线索名","kind":"伏笔|线索|悬念|承诺","detail":"埋在哪里、指向什么"}]`;
+  return { system, user };
+}
+
+/* ============ 12. 拆书分析 ============ */
+export function deconstruct(title, stats, digest) {
+  const system = `你是资深网文编辑兼拆书教练，擅长从一部成熟作品里提炼可复用的结构与写法。只输出 JSON，不要任何解释或多余文字。
+分析原则：
+1. 结论必须由给定文本支撑，不要套用通用模板；
+2. 写法的描述要具体到「怎么做」，而不是「文笔好」这类空话；
+3. 提炼的规则要能直接注入写作提示词使用。`;
+  const statLines = [
+    `总字数：${stats.totalWords}`,
+    `章节数：${stats.chapterCount}`,
+    `平均每章：${stats.avgChapterWords} 字`,
+    `对话占比：${stats.dialogueRatio}%`,
+    `平均句长：${stats.avgSentence} 字`,
+    `平均段长：${stats.avgParagraph} 字`,
+    `人称判断：${stats.povGuess}`,
+  ].join('\n');
+  const user = `【参考作品】《${title || '未命名参考作品'}》
+
+【文本统计】
+${statLines}
+
+【结构采样】
+${digest}
+
+请完成一次完整的拆书，输出 JSON 对象：
+{
+  "summary":"作品梗概与核心卖点（150字内）",
+  "structure":{"pattern":"整体结构模型（如三幕式/英雄之旅/双线交汇/单元剧）","beats":["关键情节点 1（含大致章节位置）","关键情节点 2","……"]},
+  "characters":[{"name":"角色名","role":"主角|对手|伙伴|导师","want":"核心欲望","flaw":"致命缺陷","arc":"弧线变化"}],
+  "style":{"pov":"叙事视角","tone":"语言基调","sentence":"句式特征","dialogue":"对话写法","description":"描写偏好","pacing":"节奏控制","signature":["可识别的标志性写法"]},
+  "techniques":["可复用的具体技巧 1","技巧 2","……"],
+  "rules":[{"kind":"style|anti_ai","name":"规则名（8字内）","content":"可直接写入写作提示词的规则（60字内）"}]
+}
+要求：characters 3-6 个，beats 4-8 条，techniques 3-6 条，rules 4-8 条。`;
   return { system, user };
 }

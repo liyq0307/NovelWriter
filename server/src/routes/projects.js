@@ -8,6 +8,7 @@ import { callAI } from '../ai.js';
 import * as P from '../prompts.js';
 import * as M from '../mock.js';
 import { parseJSONLoose, countWords } from '../util.js';
+import { searchProject, dropProjectIndex } from '../search.js';
 
 const r = Router();
 
@@ -53,8 +54,9 @@ r.get('/:id', (req, res) => {
   const characters = all('SELECT * FROM characters WHERE project_id = ? ORDER BY id', p.id);
   const relations = all('SELECT * FROM relations WHERE project_id = ? ORDER BY id', p.id);
   const threads = all('SELECT * FROM threads WHERE project_id = ? ORDER BY status, last_chapter DESC, id', p.id);
+  const facts = all("SELECT * FROM facts WHERE project_id = ? AND status = 'active' ORDER BY id DESC", p.id);
   const w = get('SELECT COALESCE(SUM(word_count), 0) AS w FROM chapters WHERE project_id = ?', p.id);
-  res.json({ ...withJSON(p), volumes, chapters, world, characters, relations, threads, word_total: w.w });
+  res.json({ ...withJSON(p), volumes, chapters, world, characters, relations, threads, facts, word_total: w.w });
 });
 
 r.patch('/:id', (req, res) => {
@@ -80,11 +82,23 @@ r.patch('/:id', (req, res) => {
 r.delete('/:id', (req, res) => {
   const p = proj(req.params.id);
   if (!p) return res.status(404).json({ error: '作品不存在' });
-  for (const t of ['chapters', 'volumes', 'world_entries', 'characters', 'relations', 'threads', 'chapter_revisions', 'batches', 'writing_log']) {
+  for (const t of ['chapters', 'volumes', 'world_entries', 'characters', 'relations', 'threads', 'facts', 'chapter_revisions', 'batches', 'writing_log', 'deconstructions', 'prompt_templates', 'prompt_template_history']) {
     run(`DELETE FROM ${t} WHERE project_id = ?`, p.id);
   }
+  dropProjectIndex(p.id);
   run('DELETE FROM projects WHERE id = ?', p.id);
   res.json({ ok: true });
+});
+
+/* ============ 全文检索（FTS5，失败降级 LIKE） ============ */
+
+r.get('/:id/search', (req, res) => {
+  const p = proj(req.params.id);
+  if (!p) return res.status(404).json({ error: '作品不存在' });
+  const q = String(req.query.q || '').trim();
+  if (!q) return res.json({ query: q, hits: [] });
+  const limit = Math.min(30, Math.max(1, Number(req.query.limit) || 12));
+  res.json({ query: q, hits: searchProject(p.id, q, limit) });
 });
 
 /* ============ AI：开书方向 ============ */
@@ -93,9 +107,15 @@ r.post('/:id/directions', async (req, res) => {
   const p = proj(req.params.id);
   if (!p) return res.status(404).json({ error: '作品不存在' });
   try {
-    const { system, user } = P.directions(p);
-    const out = await callAI({ task: 'planner', step: 'directions', system, user, projectId: p.id, mock: () => M.directions(p) });
-    const arr = parseJSONLoose(out.text);
+    const guide = req.body?.guide && typeof req.body.guide === 'object' ? req.body.guide : {};
+    const { system, user } = P.directions(p, guide);
+    const out = await callAI({ task: 'planner', step: 'directions', system, user, projectId: p.id, mock: () => M.directions(p, guide) });
+    let arr = parseJSONLoose(out.text);
+    /* 模型偶尔只返回一个方向对象，或包一层 { directions: [...] }，这里做兼容 */
+    if (arr && !Array.isArray(arr)) {
+      const inner = arr.directions || arr.candidates || arr.data;
+      arr = Array.isArray(inner) ? inner : arr.title ? [arr] : null;
+    }
     if (!Array.isArray(arr) || !arr.length) {
       return res.status(502).json({ error: 'AI 返回的方向无法解析，请重试；若反复失败请换用更稳定的模型', raw: out.text.slice(0, 400) });
     }
@@ -162,6 +182,16 @@ r.delete('/:id/world/:wid', (req, res) => {
   const row = get('SELECT * FROM world_entries WHERE id = ?', Number(req.params.wid));
   if (!row) return res.status(404).json({ error: '条目不存在' });
   run('DELETE FROM world_entries WHERE id = ?', row.id);
+  touch(row.project_id);
+  res.json({ ok: true });
+});
+
+/* ============ 既定事实（写后自动抽取，可人工删除） ============ */
+
+r.delete('/:id/facts/:fid', (req, res) => {
+  const row = get('SELECT * FROM facts WHERE id = ? AND project_id = ?', Number(req.params.fid), Number(req.params.id));
+  if (!row) return res.status(404).json({ error: '事实不存在' });
+  run('DELETE FROM facts WHERE id = ?', row.id);
   touch(row.project_id);
   res.json({ ok: true });
 });

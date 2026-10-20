@@ -226,6 +226,53 @@ async function main() {
   const rules2 = await api('GET', `/rules?projectId=${p.id}`);
   ok('本书规则启用开关', rules2.some((r) => r.id === ruleAdd.id && r.enabled === 0));
 
+  console.log('▶ 全文检索 / 提示词模板 / 拆书 / 富格式导出');
+  const search = await api('GET', `/projects/${p.id}/search?q=${encodeURIComponent('测试路人')}`);
+  ok('全文检索命中角色', search.hits.some((h) => h.kind === 'character' && h.title === '测试路人'), `命中 ${search.hits.length} 条`);
+  const pt = await api('GET', `/projects/${p.id}/prompt-templates`);
+  ok('提示词模板列表', Array.isArray(pt) && pt.length >= 10 && pt.some((t) => t.step === 'write'));
+  await api('PUT', `/projects/${p.id}/prompt-templates/write`, { system: '你是冷硬派作者', suffix: '每章至少一次气味描写' });
+  const wt = (await api('GET', `/projects/${p.id}/prompt-templates`)).find((t) => t.step === 'write');
+  ok('保存本书提示词覆盖', wt?.overridden === true && wt.system.includes('冷硬派') && wt.suffix.includes('气味'));
+  await api('PUT', `/projects/${p.id}/prompt-templates/write`, { system: '你是冷硬派作者（第二版）', suffix: '每章至少一次气味描写' });
+  const hist = await api('GET', `/projects/${p.id}/prompt-templates/write/history`);
+  ok('提示词历史留档', Array.isArray(hist) && hist.length >= 1, `${hist.length} 个版本`);
+  await api('POST', `/projects/${p.id}/prompt-templates/write/rollback`, { historyId: hist[0].id });
+  const afterRb = (await api('GET', `/projects/${p.id}/prompt-templates`)).find((t) => t.step === 'write');
+  ok('提示词回滚', afterRb?.system === '你是冷硬派作者');
+  await api('DELETE', `/projects/${p.id}/prompt-templates/write`);
+  const afterReset = (await api('GET', `/projects/${p.id}/prompt-templates`)).find((t) => t.step === 'write');
+  ok('提示词恢复默认', afterReset?.overridden === false);
+
+  const refText = [
+    '第一章 夜行',
+    '灯灭了。他站在巷口，听见远处有人在数数。'.repeat(20),
+    '第二章 灯下',
+    '她把灯罩擦干净，火光在玻璃上晃动。'.repeat(20),
+    '第三章 灰烬',
+    '天亮之前，他终于看见了那个人的脸。'.repeat(20),
+  ].join('\n\n');
+  const dec = await api('POST', `/projects/${p.id}/deconstructions`, { title: '参考样本', text: refText });
+  ok('拆书自动分章', dec.chapter_count === 3 && dec.status === 'done', `${dec.chapter_count} 章 / ${dec.word_count} 字`);
+  ok('拆书结果结构', !!dec.result?.structure?.pattern && dec.result.characters.length >= 3 && dec.result.rules.length >= 4,
+    `${dec.result?.characters.length} 人 / ${dec.result?.rules.length} 条规则`);
+  const toRules = await api('POST', `/projects/${p.id}/deconstructions/${dec.id}/to-rules`, {});
+  ok('拆书规则写入写法库', toRules.added >= 4, `新增 ${toRules.added} 条`);
+  await api('DELETE', `/projects/${p.id}/deconstructions/${dec.id}`);
+  ok('拆书记录删除', (await api('GET', `/projects/${p.id}/deconstructions`)).length === 0);
+
+  const gd = await api('POST', `/projects/${p.id}/directions`, {
+    guide: { genre: '悬疑', sellingPoints: ['悬念反转'], pacing: '快节奏强冲突', audience: '男性向', taboos: '不写系统面板' },
+  });
+  ok('构思向导生成方向', Array.isArray(gd) && gd.length === 3 && gd.every((x) => x.genre.includes('悬疑')));
+
+  const dx = await fetch(`${BASE}/projects/${p.id}/export?format=docx`);
+  const dxBuf = Buffer.from(await dx.arrayBuffer());
+  ok('DOCX 导出', dx.ok && dxBuf.subarray(0, 2).toString() === 'PK' && dxBuf.length > 500, `${dxBuf.length} 字节`);
+  const ep = await fetch(`${BASE}/projects/${p.id}/export?format=epub`);
+  const epBuf = Buffer.from(await ep.arrayBuffer());
+  ok('EPUB 导出', ep.ok && epBuf.subarray(0, 2).toString() === 'PK' && epBuf.includes('application/epub+zip'), `${epBuf.length} 字节`);
+
   console.log('▶ 短篇流程');
   const sp = await api('POST', '/projects', { premise: '深夜便利店打烊前，店员发现收银机多出一张三十年前的纸币', type: 'short', targetWords: 6000 });
   const sds = await api('POST', `/projects/${sp.id}/directions`, {});

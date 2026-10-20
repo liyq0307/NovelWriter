@@ -30,6 +30,15 @@ function sseInit(res) {
   });
 }
 
+/* ============ 单章正文（含 content，供去AI味等页面读取） ============ */
+r.get('/:id/chapters/:cid', (req, res) => {
+  const p = proj(req.params.id);
+  if (!p) return res.status(404).json({ error: '作品不存在' });
+  const c = chapter(p.id, req.params.cid);
+  if (!c) return res.status(404).json({ error: '章节不存在' });
+  res.json({ ...c, content: c.content || '' });
+});
+
 /* ============ 整章生成（SSE） ============ */
 r.post('/:id/chapters/:cid/write', async (req, res) => {
   const p = proj(req.params.id);

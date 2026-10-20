@@ -1,14 +1,21 @@
 import { Link, useNavigate } from 'react-router-dom';
 import { useEffect, useState } from 'react';
-import { api, cnNum, STATUS_NAMES } from '../api';
+import { api, cnNum } from '../api';
 import { useProject } from './ProjectPage';
 import { Badge } from '../components/ui';
-import type { Stats } from '../types';
+import type { SearchHit, Stats } from '../types';
+
+const HIT_NAMES: Record<string, string> = {
+  world: '设定', character: '人物', chapter: '章节', fact: '事实', thread: '线索',
+};
 
 export default function Overview() {
   const { project } = useProject();
   const nav = useNavigate();
   const [stats, setStats] = useState<Stats | null>(null);
+  const [q, setQ] = useState('');
+  const [hits, setHits] = useState<SearchHit[] | null>(null);
+  const [searching, setSearching] = useState(false);
   const d = project.direction;
   const ct = project.contract;
   const done = project.chapters.filter((c) => c.word_count > 0);
@@ -25,13 +32,27 @@ export default function Overview() {
   }, [project.id, project.word_total]);
 
   const steps = [
-    { key: 'direction', label: '定方向', done: !!d, to: 'direction' },
-    { key: 'world', label: '搭世界', done: project.world.length > 0, to: 'world' },
-    { key: 'characters', label: '立人物', done: project.characters.length > 0, to: 'characters' },
-    { key: 'plan', label: '架构与拆章', done: project.chapters.length > 0, to: 'plan' },
-    { key: 'write', label: '成正文', done: done.length > 0, to: 'write' },
+    { key: 'direction', label: '定方向', done: !!d, to: `/p/${project.id}/direction` },
+    { key: 'world', label: '搭世界', done: project.world.length > 0, to: `/p/${project.id}/world` },
+    { key: 'characters', label: '立人物', done: project.characters.length > 0, to: `/p/${project.id}/characters` },
+    { key: 'plan', label: '架构与拆章', done: project.chapters.length > 0, to: `/p/${project.id}/plan` },
+    { key: 'write', label: '成正文', done: done.length > 0, to: `/p/${project.id}/write` },
   ];
   const currentIdx = steps.findIndex((s) => !s.done);
+
+  const search = async () => {
+    const query = q.trim();
+    if (!query) { setHits(null); return; }
+    setSearching(true);
+    try {
+      const r = await api.get(`/projects/${project.id}/search?q=${encodeURIComponent(query)}`);
+      setHits(r.hits || []);
+    } catch {
+      setHits([]);
+    } finally {
+      setSearching(false);
+    }
+  };
 
   return (
     <div>
@@ -93,6 +114,34 @@ export default function Overview() {
         </div>
       )}
 
+      <div className="card mt16">
+        <div className="card-title">资料检索</div>
+        <div className="row">
+          <input
+            type="text"
+            value={q}
+            placeholder="搜索世界设定 / 角色 / 章节摘要 / 事实 / 线索"
+            style={{ flex: 1 }}
+            onChange={(e) => setQ(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') search(); }}
+          />
+          <button className="btn small" disabled={searching} onClick={search}>{searching ? '检索中…' : '检索'}</button>
+        </div>
+        {hits && (
+          hits.length ? (
+            <div className="stack mt16">
+              {hits.map((h) => (
+                <div key={`${h.kind}:${h.refId}`} className="row-wrap" style={{ alignItems: 'baseline' }}>
+                  <Badge tone="info">{HIT_NAMES[h.kind] || h.kind}</Badge>
+                  <b>{h.title}</b>
+                  <span className="muted small">{h.snippet}</span>
+                </div>
+              ))}
+            </div>
+          ) : <p className="muted small mt8">没有命中，换个关键词试试。</p>
+        )}
+      </div>
+
       <div className="grid grid-2 mt16">
         <div className="card">
           <div className="card-title">本书方向</div>
@@ -108,20 +157,24 @@ export default function Overview() {
                 {d.sellingPoints?.map((s, i) => <span key={i} className="chip">{s}</span>)}
               </div>
               <div className="mt16">
-                <Link className="btn small" to="direction">查看 / 更换方向</Link>
+                <Link className="btn small" to={`/p/${project.id}/direction`}>查看 / 更换方向</Link>
               </div>
             </>
           ) : (
             <div className="empty" style={{ padding: '18px 0' }}>
               <div className="empty-title">还没有确定方向</div>
               <div className="empty-desc">让 AI 基于你的灵感给出三个差异明显的候选方向：题材、基调、叙事方式各不相同。</div>
-              <div className="empty-action"><button className="btn primary" onClick={() => nav('direction')}>去定方向</button></div>
+              <div className="empty-action"><button className="btn primary" onClick={() => nav(`/p/${project.id}/direction`)}>去定方向</button></div>
             </div>
           )}
         </div>
 
         <div className="card">
-          <div className="card-title">创作约定</div>
+          <div className="card-title">
+            创作约定
+            <span className="grow" />
+            <Link className="small" to={`/p/${project.id}/direction`}>编辑</Link>
+          </div>
           {ct ? (
             <div className="kv">
               <div><b>视角</b>{ct.pov || '—'}</div>
@@ -152,7 +205,7 @@ export default function Overview() {
                   <td>{c.title || '（未命名）'}</td>
                   <td><span className="row" style={{ gap: 6 }}><span className={`dot ${c.status}`} />{c.status === 'planned' ? '待写' : c.status === 'draft' ? '草稿' : '完成'}</span></td>
                   <td className="muted">{c.word_count}</td>
-                  <td><Link to={`write/${c.id}`}>写作 →</Link></td>
+                  <td><Link to={`/p/${project.id}/write/${c.id}`}>写作 →</Link></td>
                 </tr>
               ))}
             </tbody>

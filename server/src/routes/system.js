@@ -4,6 +4,7 @@
 import { Router } from 'express';
 import { all, get, run, now, parseField } from '../db.js';
 import { getAISettings, isMockMode, testConnection } from '../ai.js';
+import { buildDocx, buildEpub } from '../export.js';
 
 const r = Router();
 
@@ -37,6 +38,29 @@ r.post('/settings/test', async (req, res) => {
     res.json(result);
   } catch (e) {
     res.status(502).json({ ok: false, error: e.message });
+  }
+});
+
+/** 拉取服务商的模型列表（GET {baseUrl}/models），供设置页下拉选择 */
+r.post('/settings/models', async (req, res) => {
+  const b = req.body || {};
+  const baseUrl = String(b.baseUrl || '').trim().replace(/\/+$/, '');
+  const apiKey = String(b.apiKey || '').trim();
+  if (!baseUrl) return res.status(400).json({ error: '请先填写 API 地址' });
+  try {
+    const resp = await fetch(`${baseUrl}/models`, {
+      headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
+      signal: AbortSignal.timeout(20000),
+    });
+    const text = resp.ok ? '' : (await resp.text().catch(() => '')).slice(0, 300);
+    if (!resp.ok) return res.status(502).json({ error: `HTTP ${resp.status}${text ? `：${text}` : ''}` });
+    const data = await resp.json();
+    const list = (Array.isArray(data?.data) ? data.data : Array.isArray(data) ? data : [])
+      .map((x) => (typeof x === 'string' ? x : x?.id))
+      .filter(Boolean);
+    res.json({ models: [...new Set(list)].sort() });
+  } catch (e) {
+    res.status(502).json({ error: e?.message || '获取模型列表失败' });
   }
 });
 
@@ -162,7 +186,17 @@ r.get('/projects/:id/export', (req, res) => {
   if (!p) return res.status(404).json({ error: '作品不存在' });
   const volumes = all('SELECT * FROM volumes WHERE project_id = ? ORDER BY idx', p.id);
   const chapters = all('SELECT * FROM chapters WHERE project_id = ? ORDER BY idx, id', p.id);
-  const fmt = req.query.format === 'txt' ? 'txt' : 'md';
+  const fmt = ['txt', 'md', 'docx', 'epub'].includes(String(req.query.format)) ? String(req.query.format) : 'md';
+
+  if (fmt === 'docx' || fmt === 'epub') {
+    const buf = fmt === 'docx' ? buildDocx(p, volumes, chapters) : buildEpub(p, volumes, chapters);
+    res.setHeader('Content-Type', fmt === 'docx'
+      ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+      : 'application/epub+zip');
+    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(p.title)}.${fmt}`);
+    return res.send(buf);
+  }
+
   const d = parseField(p.direction, null);
   const has = (v) => chapters.filter((c) => c.volume_id === v.id);
   const orphans = chapters.filter((c) => !c.volume_id || !volumes.some((v) => v.id === c.volume_id));
