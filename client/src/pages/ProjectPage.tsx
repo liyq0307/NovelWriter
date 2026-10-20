@@ -9,6 +9,7 @@ import Plan from './Plan';
 import World from './World';
 import Characters from './Characters';
 import Writer from './Writer';
+import Threads from './Threads';
 import Rules from './Rules';
 import Usage from './Usage';
 
@@ -30,8 +31,9 @@ const NAV = [
   { to: 'characters', label: '角色库', num: '四' },
   { to: 'plan', label: '架构规划', num: '五' },
   { to: 'write', label: '写作台', num: '六' },
-  { to: 'rules', label: '写法规则', num: '七' },
-  { to: 'usage', label: 'AI 用量', num: '八' },
+  { to: 'threads', label: '伏笔线索', num: '七' },
+  { to: 'rules', label: '写法规则', num: '八' },
+  { to: 'usage', label: 'AI 用量', num: '九' },
 ];
 
 export default function ProjectPage() {
@@ -112,6 +114,7 @@ export default function ProjectPage() {
             <Route path="characters" element={<Characters />} />
             <Route path="write" element={<Writer />} />
             <Route path="write/:chapterId" element={<Writer />} />
+            <Route path="threads" element={<Threads />} />
             <Route path="rules" element={<Rules />} />
             <Route path="usage" element={<Usage />} />
           </Routes>

@@ -213,13 +213,31 @@ export function review(c) {
   return JSON.stringify(obj, null, 2);
 }
 
-/* ---------- 角色状态同步 ---------- */
-export function stateSync(c, chars) {
-  const seed = seedOf('sync:' + c.id + c.title);
-  const list = chars.slice(0, 3).map((ch, i) => ({
+/* ---------- 写后整理：摘要 / 角色状态 / 伏笔线索 ---------- */
+export function postWrite(p, c, chars, threads) {
+  const seed = seedOf('post:' + c.id + c.title);
+  const summary = `第${c.idx}章《${clip(c.title, 12)}》中，${clip(c.brief || '主线继续推进', 60)}。关键信息已经露出，人物关系出现新的张力，章末留下待解的问题。`;
+  const list = (chars || []).slice(0, 3).map((ch, i) => ({
     name: ch.name,
     status: `第${c.idx}章后：仍在主线现场，知晓了「${clip(c.title, 8)}」的关键信息，与同伴的信任${i === 0 ? '加深' : '出现裂痕'}；${pick(['身上添了新伤', '失去了一件重要东西', '做出了无法回头的选择', '握住了一个新的线索'], seed + i)}。`,
   }));
+  const existing = new Set((threads || []).map((t) => t.name));
+  const newName = `未解之约·${clip(c.title, 6) || c.idx}`;
+  const threadEvents = existing.has(newName)
+    ? [{ name: newName, action: 'advance', kind: '悬念', detail: `本章再次被提起，指向更深的一层真相。` }]
+    : [
+        { name: newName, action: 'new', kind: '悬念', detail: `本章留下的问题：${clip(c.hook || c.brief || '下一步会发生什么', 60)}` },
+      ];
+  return JSON.stringify({ summary, characters: list, threads: threadEvents }, null, 2);
+}
+
+/* ---------- 从正文补录线索 ---------- */
+export function extractThreads(c) {
+  const seed = seedOf('threads:' + c.id + c.title);
+  const list = [
+    { name: `旧名单上的名字·${clip(c.title, 6) || c.idx}`, kind: '悬念', detail: `第${c.idx}章出现的关键信息，指向更早的旧案，尚未解释来源。` },
+    { name: `${pick(PLACES, seed)}的约定`, kind: '承诺', detail: '人物之间给出一个尚未兑现的承诺，后续需要回应。' },
+  ];
   return JSON.stringify(list, null, 2);
 }
 

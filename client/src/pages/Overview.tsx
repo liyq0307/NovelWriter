@@ -1,17 +1,28 @@
 import { Link, useNavigate } from 'react-router-dom';
-import { cnNum, STATUS_NAMES } from '../api';
+import { useEffect, useState } from 'react';
+import { api, cnNum, STATUS_NAMES } from '../api';
 import { useProject } from './ProjectPage';
 import { Badge } from '../components/ui';
+import type { Stats } from '../types';
 
 export default function Overview() {
   const { project } = useProject();
   const nav = useNavigate();
+  const [stats, setStats] = useState<Stats | null>(null);
   const d = project.direction;
   const ct = project.contract;
   const done = project.chapters.filter((c) => c.word_count > 0);
   const recent = [...project.chapters].sort((a, b) => b.idx - a.idx).slice(0, 5);
   const target = project.target_words || 0;
   const pct = target ? Math.min(100, Math.round((project.word_total / target) * 100)) : 0;
+  const threads = project.threads || [];
+  const openThreads = threads.filter((t) => t.status === 'planted' || t.status === 'reinforced');
+
+  useEffect(() => {
+    let alive = true;
+    api.get(`/stats?projectId=${project.id}`).then((s) => { if (alive) setStats(s); }).catch(() => { /* 统计非关键 */ });
+    return () => { alive = false; };
+  }, [project.id, project.word_total]);
 
   const steps = [
     { key: 'direction', label: '定方向', done: !!d, to: 'direction' },
@@ -51,7 +62,36 @@ export default function Overview() {
           <div className="stat-num">{project.characters.length}<em>人</em></div>
           <div className="stat-label">角色卡 · {project.relations.length} 组关系</div>
         </div>
+        <div className="stat">
+          <div className="stat-num">{openThreads.length}<em>条</em></div>
+          <div className="stat-label">进行中伏笔 · 共 {threads.length} 条</div>
+        </div>
       </div>
+
+      {stats && (
+        <div className="card mt16">
+          <div className="card-title">码字节奏</div>
+          <div className="row-wrap" style={{ gap: 24, marginBottom: 10 }}>
+            <span><b style={{ fontSize: 20, fontFamily: 'var(--serif)' }}>{stats.today}</b> <span className="muted small">今日字数</span></span>
+            <span><b style={{ fontSize: 20, fontFamily: 'var(--serif)' }}>{stats.streak}</b> <span className="muted small">连续写作天数</span></span>
+            <span><b style={{ fontSize: 20, fontFamily: 'var(--serif)' }}>{stats.total}</b> <span className="muted small">累计记录字数</span></span>
+            {stats.bestDay ? <span className="muted small">最高单日 {stats.bestDay.words} 字（{stats.bestDay.day}）</span> : null}
+          </div>
+          {(() => {
+            const max = Math.max(1, ...stats.days.map((x) => x.words));
+            return (
+              <div className="chart">
+                {stats.days.map((x) => (
+                  <div key={x.day} className="chart-col" title={`${x.day} · ${x.words} 字`}>
+                    <div className="chart-bar" style={{ height: `${Math.max(2, Math.round((x.words / max) * 100))}%` }} />
+                    <span className="chart-label">{x.day.slice(5)}</span>
+                  </div>
+                ))}
+              </div>
+            );
+          })()}
+        </div>
+      )}
 
       <div className="grid grid-2 mt16">
         <div className="card">

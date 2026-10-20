@@ -166,6 +166,19 @@ export function chapterWrite(p, c, ctx) {
     parts.push('\n【反AI规则（必须遵守）】');
     for (const r of antiRules) parts.push(`- ${r.name}：${r.content}`);
   }
+  if (ctx.threads?.length) {
+    parts.push('\n【伏笔与线索（需承接或回收）】');
+    for (const t of ctx.threads.slice(0, 12)) {
+      parts.push(`- [${t.status === 'planted' ? '已埋' : '推进中'}] ${t.name}（${t.kind}）：${clip(t.detail, 100)}`);
+    }
+    parts.push('本章如推进或回收其中线索，必须在正文中给出可被读者感知的动作或信息，不要只在旁白里提一句。');
+  }
+  if (ctx.summaries?.length) {
+    parts.push('\n【前情提要（最近章节，仅供承接，不要复述）】');
+    for (const s of ctx.summaries) {
+      parts.push(`- 第${s.idx}章《${s.title || '未命名'}》：${clip(s.summary, 160)}`);
+    }
+  }
   parts.push('\n【上一章结尾】');
   parts.push(ctx.tail ? clip(ctx.tail, 600) : '（本章为开篇，直接进入故事，不要写楔子式说明）');
   parts.push('\n【本章任务】');
@@ -180,16 +193,18 @@ export function chapterWrite(p, c, ctx) {
 }
 
 /* ============ 7. 续写 ============ */
-export function continueWrite(p, c, before, target) {
+export function continueWrite(p, c, before, target, ctx = {}) {
   const system = `你是一位职业中文小说作者，正在为已写正文做无缝续写。规则：
 1. 只输出从断点继续的新内容，不得重复、概括或改写已有正文；
 2. 保持人称、时态、节奏与情绪的连贯；
 3. 遵守本书世界规则与人物设定，杜绝AI腔；
 4. 只输出正文，不要任何解释或标记。`;
+  const threadLine = (ctx.threads || []).slice(0, 6).map((t) => `${t.name}（${t.kind}）`).join('、');
   const user = `【作品】
 ${bookBrief(p)}
 
 【本章任务】${c.brief || '（未定）'}${c.hook ? `\n【章末钩子】${c.hook}` : ''}
+${threadLine ? `\n【可承接的伏笔】${threadLine}` : ''}
 
 【已有正文（断点前片段）】
 ${clip(before, 1200)}
@@ -230,6 +245,10 @@ export function review(p, c, ctx) {
     for (const ch of ctx.useChars) parts.push(`- ${ch.name}：${clip(ch.status || ch.profile, 80)}`);
   }
   parts.push(`\n【正文】\n${c.content || ''}`);
+  if (ctx.threads?.length) {
+    parts.push('\n【进行中的伏笔与线索】');
+    for (const t of ctx.threads.slice(0, 10)) parts.push(`- ${t.name}（${t.kind}）：${clip(t.detail, 80)}`);
+  }
   parts.push(`\n请从四个维度检查：
 1. 任务完成度：是否完成本章任务、钩子是否落位；
 2. 一致性：人物言行、世界规则、与前文承接是否矛盾；
@@ -242,19 +261,55 @@ export function review(p, c, ctx) {
   return { system, user: parts.join('\n') };
 }
 
-/* ============ 10. 角色状态同步 ============ */
-export function stateSync(c, chars) {
-  const system = '你是小说连载的资料管理员，负责在每章写完后同步角色当前状态。只输出 JSON，不要多余文字。';
-  const list = (chars || []).map((ch) => `- ${ch.name}：${ch.status || '（暂无记录）'}`).join('\n');
-  const user = `【角色与当前状态】
-${list || '（无角色）'}
+/* ============ 10. 写后整理：章节摘要 + 角色状态 + 伏笔线索 ============ */
+/**
+ * 一次调用完成三件事，减少连续创作中的重复消耗：
+ * - 本章摘要：成为后续章节的长期记忆
+ * - 角色状态：位置、处境、掌握信息、关系变化
+ * - 伏笔线索：新埋、推进、回收、放弃
+ */
+export function postWrite(p, c, chars, threads) {
+  const system = '你是小说连载的资料管理员，负责在每章写完后整理可被后续章节直接引用的记忆。只输出 JSON，不要任何解释或多余文字。';
+  const charList = (chars || []).map((ch) => `- ${ch.name}（${ch.role}）：${ch.status || '（暂无记录）'}`).join('\n');
+  const threadList = (threads || []).length
+    ? (threads || []).map((t) => `- ${t.name}（${t.kind}，${t.status}）：${t.detail || '（暂无说明）'}`).join('\n')
+    : '（暂无进行中的伏笔）';
+  const user = `【作品】《${p.title}》
+【本章】第${c.idx}章《${c.title || '未命名'}》
+【本章任务】${clip(c.brief, 200) || '（未定）'}
+
+【角色与当前状态】
+${charList || '（无角色）'}
+
+【进行中的伏笔与线索】
+${threadList}
 
 【本章正文】
-${clip(c.content, 4000)}
+${clip(c.content, 6000)}
 
-根据本章剧情，更新受影响角色的当前状态（位置、处境、掌握的新信息、关系变化、伤势等）。只输出确实发生变化的角色，未受影响的角色不要输出。
+请完成三件事：
+1. 本章摘要：80-120 字，只记录已经发生的事实（谁做了什么、得到/失去了什么、留下什么悬念），供后续章节回顾，不评价文笔。
+2. 角色最新状态：只列本章确实受影响的角色；状态写成可被后续章节直接引用的事实（位置、处境、掌握信息、关系变化、伤势等），80 字内。
+3. 伏笔与线索：new=本章新埋下的，advance=本章推进的，resolve=本章已回收的，drop=本章明确放弃的。已有线索必须沿用原名；没有变化就输出空数组。
+
+输出 JSON：
+{"summary":"本章摘要","characters":[{"name":"角色名","status":"最新状态"}],"threads":[{"name":"线索名","action":"new|advance|resolve|drop","kind":"伏笔|线索|悬念|承诺","detail":"一句话说明"}]}`;
+  return { system, user };
+}
+
+/* ============ 11. 从正文补录伏笔线索 ============ */
+export function extractThreads(c, existingNames) {
+  const system = '你是小说责编，擅长从正文中识别伏笔、线索、悬念与承诺。只输出 JSON 数组，不要任何解释。';
+  const user = `【已有线索（不要重复）】
+${(existingNames || []).length ? existingNames.map((n) => `- ${n}`).join('\n') : '（暂无）'}
+
+【本章正文】
+${clip(c.content, 6000)}
+
+请找出本章真正埋下、但尚未回收的伏笔 / 线索 / 悬念 / 承诺。只输出确实会影响后续情节的条目，不要把普通情节当伏笔。
+每条给出：名称（可复用、具体）、类型、埋设位置与指向。
 
 输出 JSON 数组：
-[{"name":"角色名","status":"最新状态（80字内，写成可被后续章节直接引用的事实）"}]`;
+[{"name":"线索名","kind":"伏笔|线索|悬念|承诺","detail":"埋在哪里、指向什么"}]`;
   return { system, user };
 }

@@ -83,6 +83,7 @@ CREATE TABLE IF NOT EXISTS chapters (
   hook       TEXT NOT NULL DEFAULT '',          -- 章末钩子
   status     TEXT NOT NULL DEFAULT 'planned',   -- planned | draft | done
   content    TEXT NOT NULL DEFAULT '',
+  summary    TEXT NOT NULL DEFAULT '',          -- 本章摘要（写后由 AI 整理，作为后续章节的记忆）
   review     TEXT,                             -- 检查结果 JSON
   word_count INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
@@ -115,12 +116,67 @@ CREATE TABLE IF NOT EXISTS ai_calls (
   created_at    TEXT NOT NULL
 );
 
+-- 章节历史快照：保存正文时留痕，可回滚
+CREATE TABLE IF NOT EXISTS chapter_revisions (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id INTEGER NOT NULL,
+  chapter_id INTEGER NOT NULL,
+  content    TEXT NOT NULL,
+  word_count INTEGER NOT NULL DEFAULT 0,
+  reason     TEXT NOT NULL DEFAULT 'autosave',  -- autosave | generate | batch | restore | manual
+  created_at TEXT NOT NULL
+);
+
+-- 伏笔 / 线索追踪：写后由 AI 回流状态，也可人工维护
+CREATE TABLE IF NOT EXISTS threads (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id      INTEGER NOT NULL,
+  name            TEXT NOT NULL,
+  kind            TEXT NOT NULL DEFAULT '伏笔',   -- 伏笔 | 线索 | 悬念 | 承诺
+  status          TEXT NOT NULL DEFAULT 'planted',-- planted 已埋 | reinforced 推进中 | resolved 已回收 | abandoned 已放弃
+  detail          TEXT NOT NULL DEFAULT '',
+  planted_chapter INTEGER,
+  last_chapter    INTEGER,
+  created_at      TEXT NOT NULL,
+  updated_at      TEXT NOT NULL
+);
+
+-- 每日写作字数（按项目），用于码字统计与连续写作天数
+CREATE TABLE IF NOT EXISTS writing_log (
+  project_id INTEGER NOT NULL,
+  day        TEXT NOT NULL,
+  words      INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (project_id, day)
+);
+
+-- 批量连写任务（自动导演简版）：可暂停、恢复、取消
+CREATE TABLE IF NOT EXISTS batches (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id    INTEGER NOT NULL,
+  status        TEXT NOT NULL DEFAULT 'running', -- running | paused | done | error | cancelled
+  from_idx      INTEGER NOT NULL,
+  to_idx        INTEGER NOT NULL,
+  cursor_idx    INTEGER NOT NULL DEFAULT 0,
+  done_chapters INTEGER NOT NULL DEFAULT 0,
+  words_added   INTEGER NOT NULL DEFAULT 0,
+  review        INTEGER NOT NULL DEFAULT 1,
+  sync          INTEGER NOT NULL DEFAULT 1,
+  overwrite     INTEGER NOT NULL DEFAULT 0,
+  message       TEXT NOT NULL DEFAULT '',
+  created_at    TEXT NOT NULL,
+  updated_at    TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_world_project   ON world_entries(project_id);
 CREATE INDEX IF NOT EXISTS idx_chars_project   ON characters(project_id);
 CREATE INDEX IF NOT EXISTS idx_vols_project    ON volumes(project_id);
 CREATE INDEX IF NOT EXISTS idx_chapters_proj   ON chapters(project_id);
 CREATE INDEX IF NOT EXISTS idx_calls_project   ON ai_calls(project_id);
 CREATE INDEX IF NOT EXISTS idx_calls_chapter   ON ai_calls(chapter_id);
+CREATE INDEX IF NOT EXISTS idx_rev_chapter     ON chapter_revisions(chapter_id);
+CREATE INDEX IF NOT EXISTS idx_threads_project ON threads(project_id);
+CREATE INDEX IF NOT EXISTS idx_batches_project ON batches(project_id);
+CREATE INDEX IF NOT EXISTS idx_log_day         ON writing_log(day);
 `);
 
 export const now = () => new Date().toISOString();
@@ -128,6 +184,13 @@ export const now = () => new Date().toISOString();
 export function all(sql, ...args) { return db.prepare(sql).all(...args); }
 export function get(sql, ...args) { return db.prepare(sql).get(...args); }
 export function run(sql, ...args) { return db.prepare(sql).run(...args); }
+
+/** 轻量迁移：老库缺少新列时补上（SQLite 的 ADD COLUMN 不支持 IF NOT EXISTS） */
+function ensureColumn(table, column, ddl) {
+  const cols = all(`PRAGMA table_info(${table})`);
+  if (!cols.some((c) => c.name === column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
+}
+ensureColumn('chapters', 'summary', "summary TEXT NOT NULL DEFAULT ''");
 
 /** 解析 DB 里的 JSON 字段 */
 export function parseField(v, fallback) {

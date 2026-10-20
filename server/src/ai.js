@@ -100,7 +100,7 @@ async function chatCompletion(s, model, call) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${s.apiKey}` },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(600_000),
+    signal: call.signal ? AbortSignal.any([call.signal, AbortSignal.timeout(600_000)]) : AbortSignal.timeout(600_000),
   });
   if (!res.ok) {
     const t = await res.text().catch(() => '');

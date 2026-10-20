@@ -1,6 +1,7 @@
 /**
  * NovelWriter 全链路冒烟测试（Mock 演示模式，无需 API Key）
- * 覆盖：建书 → 方向 → 世界 → 角色 → 卷纲 → 拆章 → 正文(SSE) → 保存+状态同步 → 检查 → 续写 → 改写 → 导出 → 用量 → 规则
+ * 覆盖：建书 → 方向 → 世界 → 角色 → 卷纲 → 拆章 → 正文(SSE) → 保存+写后整理 → 检查 → 续写 → 改写
+ *      → 版本回滚 → 伏笔线索 → 码字统计 → 批量连写 → 导出 → 用量 → 规则
  * 运行：npm run smoke
  */
 import { spawn } from 'node:child_process';
@@ -123,12 +124,30 @@ async function main() {
   const full = done.data.text;
   ok('正文完整', full.length > 800 && full.includes(ch1.hook.slice(0, 8)), `${done.data.wordCount} 字`);
 
-  console.log('▶ 保存与状态同步');
-  const save1 = await api('PUT', `/projects/${p.id}/chapters/${ch1.id}/content?sync=1`, { content: full });
+  console.log('▶ 保存与写后整理');
+  const save1 = await api('PUT', `/projects/${p.id}/chapters/${ch1.id}/content?sync=1&reason=generate`, { content: full });
   ok('正文保存', save1.ok && save1.wordCount === done.data.wordCount && save1.status === 'draft');
   ok('写后角色状态同步', Array.isArray(save1.synced) && save1.synced.length > 0, save1.synced?.map((s) => s.name).join('、'));
+  ok('写后生成章节摘要', typeof save1.summary === 'string' && save1.summary.length > 10, save1.summary?.slice(0, 40));
+  const pThreads = await api('GET', `/projects/${p.id}/threads`);
+  ok('伏笔线索回流', pThreads.length >= 1 && save1.threads >= 1, `线索 ${pThreads.length} 条`);
   const p3 = await api('GET', `/projects/${p.id}`);
   ok('全书进度更新', p3.status === 'writing' && p3.word_total > 800, `状态 ${p3.status} · ${p3.word_total} 字`);
+
+  console.log('▶ 版本历史 / 码字统计 / 线索维护');
+  await api('PUT', `/projects/${p.id}/chapters/${ch1.id}/content?force=1&reason=manual`, { content: full.slice(0, 300) });
+  const revs = await api('GET', `/projects/${p.id}/chapters/${ch1.id}/revisions`);
+  ok('正文版本快照', revs.length >= 2 && revs.some((r) => r.reason === 'generate'), `${revs.length} 个版本`);
+  const fullRev = revs[revs.length - 1];
+  const restored = await api('POST', `/projects/${p.id}/chapters/${ch1.id}/revisions/${fullRev.id}/restore`, {});
+  ok('版本回滚', restored.chapter.content.length === full.length && restored.chapter.word_count === done.data.wordCount);
+  const stats = await api('GET', `/stats?projectId=${p.id}`);
+  ok('码字统计', stats.days.length === 14 && stats.today > 0 && stats.total > 0, `今日 ${stats.today} 字 · 连续 ${stats.streak} 天`);
+  const ext = await api('POST', `/projects/${p.id}/threads/extract`, {});
+  ok('从正文补录线索', Array.isArray(ext.threads) && ext.added >= 1, `新增 ${ext.added} 条`);
+  const tAdd = await api('POST', `/projects/${p.id}/threads`, { name: '冒烟测试线索', kind: '伏笔', detail: '测试用' });
+  const tUpd = await api('PUT', `/projects/${p.id}/threads/${tAdd.id}`, { status: 'resolved' });
+  ok('线索人工维护', tUpd.status === 'resolved');
 
   console.log('▶ 检查与修文');
   const rv = await api('POST', `/projects/${p.id}/chapters/${ch1.id}/review`, {});
@@ -140,7 +159,56 @@ async function main() {
   const rwDone = rw.find((e) => e.ev === 'done');
   ok('选中改写（流式）', !!rwDone && rwDone.data.text.length > 50);
   const manualSync = await api('POST', `/projects/${p.id}/chapters/${ch1.id}/sync-state`, {});
-  ok('手动状态同步', Array.isArray(manualSync.updated));
+  ok('手动写后整理', Array.isArray(manualSync.updated) && typeof manualSync.summary === 'string');
+
+  console.log('▶ 批量连写（暂停 / 恢复）');
+  const bch1 = cp.chapters[1];
+  const bch2 = cp.chapters[2];
+  const bch3 = cp.chapters[3];
+  const batch = await api('POST', `/projects/${p.id}/batches`, {
+    fromIdx: bch1.idx, toIdx: bch3.idx, review: false, sync: true,
+  });
+  ok('创建连写任务', !!batch.id && batch.status === 'running', `第 ${batch.from_idx}—${batch.to_idx} 章`);
+
+  let bstate = batch;
+  for (let i = 0; i < 120; i++) {
+    await sleep(200);
+    bstate = await api('GET', `/projects/${p.id}/batches/${batch.id}`);
+    if (bstate.done_chapters >= 1 || ['done', 'error', 'cancelled'].includes(bstate.status)) break;
+  }
+  let pausedOk = false;
+  if (bstate.status !== 'done') {
+    await api('POST', `/projects/${p.id}/batches/${batch.id}/pause`, {});
+    for (let i = 0; i < 120; i++) {
+      await sleep(200);
+      bstate = await api('GET', `/projects/${p.id}/batches/${batch.id}`);
+      if (bstate.status === 'paused' || bstate.status === 'done') break;
+    }
+    pausedOk = bstate.status === 'paused';
+    ok('连写暂停', pausedOk, `已完成 ${bstate.done_chapters} 章`);
+    if (pausedOk) {
+      await api('POST', `/projects/${p.id}/batches/${batch.id}/resume`, {});
+      for (let i = 0; i < 200; i++) {
+        await sleep(200);
+        bstate = await api('GET', `/projects/${p.id}/batches/${batch.id}`);
+        if (['done', 'error', 'cancelled', 'paused'].includes(bstate.status)) break;
+      }
+    }
+  }
+  ok('批量连写完成', bstate.status === 'done' && bstate.done_chapters === 3, `${bstate.done_chapters} 章 · ${bstate.words_added} 字`);
+  const pBatch = await api('GET', `/projects/${p.id}`);
+  const written = pBatch.chapters.filter((c) => [bch1.idx, bch2.idx, bch3.idx].includes(c.idx) && c.word_count > 500);
+  ok('连写章节已落库', written.length === 3, written.map((c) => `第${c.idx}章 ${c.word_count}字`).join(' / '));
+  ok('连写章节摘要齐全', written.every((c) => c.summary && c.summary.length > 10));
+
+  const streamCh = cp.chapters[4];
+  const streamBatch = await api('POST', `/projects/${p.id}/batches`, {
+    fromIdx: streamCh.idx, toIdx: streamCh.idx, review: false, sync: false,
+  });
+  const streamEvents = await sse(`/projects/${p.id}/batches/${streamBatch.id}/attach`, {});
+  const streamChapter = streamEvents.find((e) => e.ev === 'chapter');
+  const streamDone = streamEvents.find((e) => e.ev === 'done');
+  ok('连写进度流（SSE）', !!streamChapter && !!streamDone && streamEvents.some((e) => e.ev === 'delta'), `${streamEvents.length} 个事件`);
 
   console.log('▶ 导出 / 用量 / 规则');
   const exp = await fetch(`${BASE}/projects/${p.id}/export?format=md`);
@@ -171,6 +239,21 @@ async function main() {
   const sEvents = await sse(`/projects/${sp.id}/chapters/${sch1.id}/write`, {});
   const sDone = sEvents.find((e) => e.ev === 'done');
   ok('短篇正文（字数按目标分摊）', !!sDone && sDone.data.wordCount > 500, `${sDone.data.wordCount} 字（目标 6000/8 章）`);
+
+  console.log('▶ 示例作品');
+  const demo = await api('POST', '/demo', {});
+  ok('载入示例作品', demo.created === true && !!demo.project?.id);
+  const demoAgain = await api('POST', '/demo', {});
+  ok('示例作品幂等', demoAgain.created === false && demoAgain.project.id === demo.project.id);
+  const dp = await api('GET', `/projects/${demo.project.id}`);
+  ok('示例作品结构完整', dp.volumes.length === 3 && dp.chapters.length === 18 && dp.world.length === 5 && dp.characters.length === 4,
+    `${dp.volumes.length} 卷 / ${dp.chapters.length} 章 / ${dp.world.length} 条设定 / ${dp.characters.length} 个角色`);
+  ok('示例正文与摘要', dp.chapters.slice(0, 3).every((c) => c.word_count > 500 && c.summary), `已写 ${dp.chapters.filter((c) => c.word_count > 0).length} 章`);
+  ok('示例伏笔', dp.threads.length >= 4 && dp.threads.some((t) => t.status === 'resolved'), `线索 ${dp.threads.length} 条`);
+  const dStats = await api('GET', `/stats?projectId=${demo.project.id}`);
+  ok('示例码字统计', dStats.total > 3000 && dStats.streak >= 3, `${dStats.total} 字 · 连续 ${dStats.streak} 天`);
+  const dRevs = await api('GET', `/projects/${demo.project.id}/chapters/${dp.chapters[0].id}/revisions`);
+  ok('示例版本历史', dRevs.length >= 2, `${dRevs.length} 个版本`);
 
   console.log(`\n结果：${passed} 通过 / ${failed} 失败`);
   if (failed > 0) process.exitCode = 1;

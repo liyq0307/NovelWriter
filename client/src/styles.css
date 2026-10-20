@@ -587,3 +587,50 @@ textarea { resize: vertical; min-height: 74px; line-height: 1.7; }
   font-family: var(--sans);
 }
 .seg button.on { background: #fff; color: var(--ink); font-weight: 600; box-shadow: 0 1px 3px rgba(40,34,22,.12); }
+
+/* ---------- 码字统计图 ---------- */
+.chart { display: flex; align-items: flex-end; gap: 6px; height: 116px; margin-top: 6px; }
+.chart-col { flex: 1; height: 100%; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; gap: 4px; min-width: 0; }
+.chart-bar { width: 100%; max-width: 30px; background: linear-gradient(180deg, #c9604c, var(--accent)); border-radius: 3px 3px 1px 1px; min-height: 2px; transition: height 0.35s ease; }
+.chart-label { font-size: 9px; color: var(--muted); white-space: nowrap; transform: scale(0.92); }
+
+/* ---------- 伏笔线索 ---------- */
+.thread-row { display: flex; align-items: flex-start; gap: 14px; padding: 13px 0; border-bottom: 1px dashed var(--line); }
+.thread-row:last-child { border-bottom: none; }
+.thread-main { flex: 1; min-width: 0; }
+.thread-name { font-size: 13.5px; }
+.thread-detail { margin-top: 5px; font-size: 12.5px; line-height: 1.75; color: var(--ink-2); }
+.thread-status { display: inline-block; font-size: 10.5px; line-height: 1.5; padding: 0 6px; border-radius: 4px; white-space: nowrap; }
+.thread-status-planted { background: var(--warn-soft); color: var(--warn); }
+.thread-status-reinforced { background: var(--info-soft); color: var(--info); }
+.thread-status-resolved { background: var(--ok-soft); color: var(--ok); }
+.thread-status-abandoned { background: #ece9e1; color: var(--muted); text-decoration: line-through; }
+
+/* ---------- 批量连写 ---------- */
+.batch-panel { margin: 0 14px 14px; border: 1px solid var(--line-2); background: var(--panel-2); border-radius: var(--radius-s); padding: 11px 13px; }
+.batch-head { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; margin-bottom: 6px; }
+.batch-title { font-size: 13px; font-weight: 600; }
+.batch-stream {
+  margin-top: 8px; max-height: 168px; overflow-y: auto; white-space: pre-wrap;
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-s);
+  padding: 9px 11px; font-size: 12px; line-height: 1.75; color: var(--ink-2);
+  font-family: var(--serif);
+}
+.batch-log { margin-top: 8px; max-height: 176px; overflow-y: auto; }
+.batch-log-item { display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 12px; border-bottom: 1px dashed var(--line); }
+.batch-log-item:last-child { border-bottom: none; }
+
+/* ---------- 历史版本 ---------- */
+.revision-list { margin-top: 8px; border: 1px solid var(--line); border-radius: var(--radius-s); max-height: 230px; overflow-y: auto; background: var(--panel); }
+.revision-row { display: flex; align-items: center; gap: 10px; padding: 8px 11px; border-bottom: 1px dashed var(--line); cursor: pointer; }
+.revision-row:last-child { border-bottom: none; }
+.revision-row:hover { background: var(--panel-2); }
+.revision-row.on { background: var(--accent-soft); }
+.revision-time { font-size: 12px; color: var(--ink-2); white-space: nowrap; }
+.revision-preview { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rev-preview { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 12px; }
+.rev-preview-body {
+  margin-top: 8px; max-height: 300px; overflow-y: auto; white-space: pre-wrap;
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--radius-s);
+  padding: 12px 14px; font-family: var(--serif); font-size: 13.5px; line-height: 1.95; color: var(--ink);
+}

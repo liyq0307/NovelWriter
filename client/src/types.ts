@@ -77,8 +77,58 @@ export interface Chapter {
   hook: string;
   status: 'planned' | 'draft' | 'done';
   content?: string;
+  summary?: string;
   word_count: number;
   review: Review | null;
+}
+
+export interface Thread {
+  id: number;
+  project_id: number;
+  name: string;
+  kind: '伏笔' | '线索' | '悬念' | '承诺';
+  status: 'planted' | 'reinforced' | 'resolved' | 'abandoned';
+  detail: string;
+  planted_chapter: number | null;
+  last_chapter: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Revision {
+  id: number;
+  word_count: number;
+  reason: string;
+  created_at: string;
+  preview: string;
+}
+
+export interface Batch {
+  id: number;
+  project_id: number;
+  status: 'running' | 'paused' | 'done' | 'error' | 'cancelled';
+  from_idx: number;
+  to_idx: number;
+  cursor_idx: number;
+  done_chapters: number;
+  words_added: number;
+  review: number;
+  sync: number;
+  overwrite: number;
+  message: string;
+  created_at: string;
+  updated_at: string;
+  running?: boolean;
+  paused?: boolean;
+  current?: { id: number; idx: number; title: string };
+}
+
+export interface Stats {
+  days: { day: string; words: number }[];
+  today: number;
+  total: number;
+  streak: number;
+  bestDay: { day: string; words: number } | null;
 }
 
 export type ProjectStatus = 'idea' | 'direction' | 'building' | 'planned' | 'writing' | 'done';
@@ -100,10 +150,11 @@ export interface Project {
   world: WorldEntry[];
   characters: Character[];
   relations: Relation[];
+  threads: Thread[];
   word_total: number;
 }
 
-export interface ProjectSummary extends Omit<Project, 'volumes' | 'chapters' | 'world' | 'characters' | 'relations'> {
+export interface ProjectSummary extends Omit<Project, 'volumes' | 'chapters' | 'world' | 'characters' | 'relations' | 'threads'> {
   chapters_total: number;
   chapters_done: number;
   word_total: number;

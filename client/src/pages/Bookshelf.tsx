@@ -7,11 +7,26 @@ import type { ProjectSummary } from '../types';
 export default function Bookshelf() {
   const [projects, setProjects] = useState<ProjectSummary[] | null>(null);
   const [showNew, setShowNew] = useState(false);
+  const [seeding, setSeeding] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const nav = useNavigate();
 
   const load = () => api.get('/projects').then(setProjects).catch((e) => setErr(e.message));
   useEffect(() => { load(); }, []);
+
+  const openDemo = async () => {
+    setSeeding(true);
+    setErr(null);
+    try {
+      const r = await api.post('/demo', {});
+      await load();
+      nav(`/p/${r.project.id}`);
+    } catch (e: any) {
+      setErr(e.message);
+    } finally {
+      setSeeding(false);
+    }
+  };
 
   return (
     <main className="page">
@@ -20,7 +35,12 @@ export default function Bookshelf() {
           <h1>我的书架</h1>
           <div className="sub">人管控、AI 管写 —— 从一句灵感，到一本有骨架、有世界、有正文的书。</div>
         </div>
-        <button className="btn primary big" onClick={() => setShowNew(true)}>＋ 新建作品</button>
+        <div className="row">
+          <button className="btn" disabled={seeding} onClick={openDemo} title="内置一本完整示例书，含世界、角色、卷纲、正文、伏笔、版本与码字统计">
+            {seeding ? '载入中…' : '载入示例作品'}
+          </button>
+          <button className="btn primary big" onClick={() => setShowNew(true)}>＋ 新建作品</button>
+        </div>
       </div>
       <ErrorNote error={err} onRetry={load} />
       {projects === null ? (
@@ -28,8 +48,13 @@ export default function Bookshelf() {
       ) : projects.length === 0 ? (
         <Empty
           title="书架还是空的"
-          desc="点击「新建作品」，写下你脑子里那句话 —— 哪怕只是一个画面、一句台词。剩下的骨架，我们一步一步搭。"
-          action={<button className="btn primary" onClick={() => setShowNew(true)}>写下第一句灵感</button>}
+          desc="点击「新建作品」，写下你脑子里那句话 —— 哪怕只是一个画面、一句台词。剩下的骨架，我们一步一步搭。也可以先载入示例作品看看完整形态。"
+          action={
+            <div className="row">
+              <button className="btn primary" onClick={() => setShowNew(true)}>写下第一句灵感</button>
+              <button className="btn" disabled={seeding} onClick={openDemo}>{seeding ? '载入中…' : '载入示例作品'}</button>
+            </div>
+          }
         />
       ) : (
         <div className="book-grid">

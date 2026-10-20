@@ -120,6 +120,41 @@ r.get('/usage', (req, res) => {
   res.json({ rows, totals, byModel, byStep });
 });
 
+/* ============ 写作统计 ============ */
+
+function dayKey(d = new Date()) {
+  const p = (x) => String(x).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+r.get('/stats', (req, res) => {
+  const pid = Number(req.query.projectId) || null;
+  const n = Math.min(90, Math.max(7, Number(req.query.days) || 14));
+  if (!pid) return res.json({ days: [], today: 0, total: 0, streak: 0, bestDay: null });
+  const rows = all('SELECT day, words FROM writing_log WHERE project_id = ? ORDER BY day', pid);
+  const map = new Map(rows.map((x) => [x.day, x.words]));
+  const days = [];
+  for (let i = n - 1; i >= 0; i--) {
+    const d = new Date();
+    d.setDate(d.getDate() - i);
+    const key = dayKey(d);
+    days.push({ day: key, words: map.get(key) || 0 });
+  }
+  const today = map.get(dayKey()) || 0;
+  const total = rows.reduce((s, x) => s + x.words, 0);
+  let streak = 0;
+  for (let i = 0; i < 3650; i++) {
+    const d = new Date();
+    d.setDate(d.getDate() - i);
+    const w = map.get(dayKey(d)) || 0;
+    if (w > 0) streak++;
+    else if (i === 0) continue; // 今天还没写，不打断连续天数
+    else break;
+  }
+  const best = rows.reduce((a, x) => (x.words > (a?.words || 0) ? x : a), null);
+  res.json({ days, today, total, streak, bestDay: best });
+});
+
 /* ============ 导出 ============ */
 
 r.get('/projects/:id/export', (req, res) => {

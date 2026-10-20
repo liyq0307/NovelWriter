@@ -32,6 +32,8 @@ export interface SSEHandlers {
   onDelta?: (d: { text: string }) => void;
   onDone?: (d: { text: string; wordCount?: number; model?: string }) => void;
   onError?: (d: { message: string }) => void;
+  /** 所有事件的通用回调（批量连写等自定义事件） */
+  onEvent?: (event: string, d: any) => void;
 }
 
 /** POST 请求的 SSE 流式读取 */
@@ -66,6 +68,7 @@ export async function sse(url: string, body: unknown, h: SSEHandlers): Promise<v
     if (!data) return;
     let parsed: any;
     try { parsed = JSON.parse(data); } catch { return; }
+    h.onEvent?.(ev, parsed);
     if (ev === 'start') h.onStart?.(parsed);
     else if (ev === 'delta') h.onDelta?.(parsed);
     else if (ev === 'done') h.onDone?.(parsed);
@@ -128,8 +131,41 @@ export const STEP_NAMES: Record<string, string> = {
   rewrite: '局部改写',
   review: '章节检查',
   state_sync: '状态同步',
+  post_write: '写后整理',
+  thread_extract: '线索补录',
   test: '连接测试',
 };
+
+export const THREAD_KINDS = ['伏笔', '线索', '悬念', '承诺'] as const;
+
+export const THREAD_STATUS_NAMES: Record<string, string> = {
+  planted: '已埋',
+  reinforced: '推进中',
+  resolved: '已回收',
+  abandoned: '已放弃',
+};
+
+export const THREAD_STATUS_TONE: Record<string, 'warn' | 'info' | 'ok' | 'default'> = {
+  planted: 'warn',
+  reinforced: 'info',
+  resolved: 'ok',
+  abandoned: 'default',
+};
+
+export const REVISION_REASON_NAMES: Record<string, string> = {
+  autosave: '自动保存',
+  generate: '生成采纳',
+  batch: '批量连写',
+  restore: '回滚',
+  manual: '手动存档',
+  clear: '清空',
+};
+
+/** 本地日期键（YYYY-MM-DD） */
+export function dayKey(d = new Date()): string {
+  const p = (x: number) => String(x).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
 
 export const STATUS_NAMES: Record<string, string> = {
   idea: '待定方向',

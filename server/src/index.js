@@ -6,7 +6,9 @@ import { PORT, HOST } from './env.js';
 import { isMockMode, getAISettings } from './ai.js';
 import writingRouter from './routes/writing.js';
 import projectsRouter from './routes/projects.js';
+import batchRouter from './routes/batch.js';
 import systemRouter from './routes/system.js';
+import demoRouter from './routes/demo.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -23,11 +25,13 @@ app.use((req, res, next) => {
 });
 
 app.get('/api/health', (req, res) => {
-  res.json({ ok: true, name: 'NovelWriter', version: '0.1.0', mock: isMockMode() });
+  res.json({ ok: true, name: 'NovelWriter', version: '0.2.0', mock: isMockMode() });
 });
 
+app.use('/api/projects', batchRouter);
 app.use('/api/projects', writingRouter);
 app.use('/api/projects', projectsRouter);
+app.use('/api', demoRouter);
 app.use('/api', systemRouter);
 
 /* 生产模式：托管前端构建产物（client/dist） */

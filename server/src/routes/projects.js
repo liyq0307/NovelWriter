@@ -46,14 +46,15 @@ r.get('/:id', (req, res) => {
   const p = proj(req.params.id);
   if (!p) return res.status(404).json({ error: '作品不存在' });
   const volumes = all('SELECT * FROM volumes WHERE project_id = ? ORDER BY idx, id', p.id);
-  const chapters = all(`SELECT id, volume_id, idx, title, brief, scenes, cast_names AS cast, hook, status, word_count, review, created_at, updated_at
+  const chapters = all(`SELECT id, volume_id, idx, title, brief, scenes, cast_names AS cast, hook, status, word_count, summary, review, created_at, updated_at
                         FROM chapters WHERE project_id = ? ORDER BY idx, id`, p.id)
     .map((c) => ({ ...c, cast: parseField(c.cast, []), review: parseField(c.review, null) }));
   const world = all('SELECT * FROM world_entries WHERE project_id = ? ORDER BY category, id', p.id);
   const characters = all('SELECT * FROM characters WHERE project_id = ? ORDER BY id', p.id);
   const relations = all('SELECT * FROM relations WHERE project_id = ? ORDER BY id', p.id);
+  const threads = all('SELECT * FROM threads WHERE project_id = ? ORDER BY status, last_chapter DESC, id', p.id);
   const w = get('SELECT COALESCE(SUM(word_count), 0) AS w FROM chapters WHERE project_id = ?', p.id);
-  res.json({ ...withJSON(p), volumes, chapters, world, characters, relations, word_total: w.w });
+  res.json({ ...withJSON(p), volumes, chapters, world, characters, relations, threads, word_total: w.w });
 });
 
 r.patch('/:id', (req, res) => {
@@ -79,7 +80,7 @@ r.patch('/:id', (req, res) => {
 r.delete('/:id', (req, res) => {
   const p = proj(req.params.id);
   if (!p) return res.status(404).json({ error: '作品不存在' });
-  for (const t of ['chapters', 'volumes', 'world_entries', 'characters', 'relations']) {
+  for (const t of ['chapters', 'volumes', 'world_entries', 'characters', 'relations', 'threads', 'chapter_revisions', 'batches', 'writing_log']) {
     run(`DELETE FROM ${t} WHERE project_id = ?`, p.id);
   }
   run('DELETE FROM projects WHERE id = ?', p.id);
@@ -327,7 +328,7 @@ r.post('/:id/volumes/:vid/plan', async (req, res) => {
 });
 
 function chapterList(projectId) {
-  return all(`SELECT id, volume_id, idx, title, brief, scenes, cast_names AS cast, hook, status, word_count, review, created_at, updated_at
+  return all(`SELECT id, volume_id, idx, title, brief, scenes, cast_names AS cast, hook, status, word_count, summary, review, created_at, updated_at
               FROM chapters WHERE project_id = ? ORDER BY idx, id`, projectId)
     .map((c) => ({ ...c, cast: parseField(c.cast, []), review: parseField(c.review, null) }));
 }
@@ -382,6 +383,94 @@ r.delete('/:id/chapters/:cid', (req, res) => {
   run('DELETE FROM chapters WHERE id = ?', c.id);
   touch(p.id);
   res.json({ ok: true });
+});
+
+/* ============ 伏笔与线索 ============ */
+
+const THREAD_KINDS = ['伏笔', '线索', '悬念', '承诺'];
+const THREAD_STATUS = ['planted', 'reinforced', 'resolved', 'abandoned'];
+
+r.get('/:id/threads', (req, res) => {
+  const p = proj(req.params.id);
+  if (!p) return res.status(404).json({ error: '作品不存在' });
+  res.json(all('SELECT * FROM threads WHERE project_id = ? ORDER BY status, last_chapter DESC, id', p.id));
+});
+
+r.post('/:id/threads', (req, res) => {
+  const p = proj(req.params.id);
+  if (!p) return res.status(404).json({ error: '作品不存在' });
+  const b = req.body || {};
+  const name = String(b.name || '').trim();
+  if (!name) return res.status(400).json({ error: '线索名不能为空' });
+  const t = now();
+  const info = run(`INSERT INTO threads (project_id, name, kind, status, detail, planted_chapter, last_chapter, created_at, updated_at)
+                    VALUES (?,?,?,?,?,?,?,?,?)`,
+    p.id, name.slice(0, 60),
+    THREAD_KINDS.includes(b.kind) ? b.kind : '伏笔',
+    THREAD_STATUS.includes(b.status) ? b.status : 'planted',
+    String(b.detail || '').slice(0, 400),
+    Number(b.plantedChapter) || null, Number(b.plantedChapter) || null, t, t);
+  touch(p.id);
+  res.json(get('SELECT * FROM threads WHERE id = ?', info.lastInsertRowid));
+});
+
+r.put('/:id/threads/:tid', (req, res) => {
+  const row = get('SELECT * FROM threads WHERE id = ? AND project_id = ?', Number(req.params.tid), Number(req.params.id));
+  if (!row) return res.status(404).json({ error: '线索不存在' });
+  const b = req.body || {};
+  run('UPDATE threads SET name = ?, kind = ?, status = ?, detail = ?, updated_at = ? WHERE id = ?',
+    String(b.name || row.name).trim().slice(0, 60),
+    THREAD_KINDS.includes(b.kind) ? b.kind : row.kind,
+    THREAD_STATUS.includes(b.status) ? b.status : row.status,
+    b.detail ?? row.detail,
+    now(), row.id);
+  res.json(get('SELECT * FROM threads WHERE id = ?', row.id));
+});
+
+r.delete('/:id/threads/:tid', (req, res) => {
+  const row = get('SELECT * FROM threads WHERE id = ? AND project_id = ?', Number(req.params.tid), Number(req.params.id));
+  if (!row) return res.status(404).json({ error: '线索不存在' });
+  run('DELETE FROM threads WHERE id = ?', row.id);
+  res.json({ ok: true });
+});
+
+/** 从某一章正文中提取伏笔线索（用于补录已有章节） */
+r.post('/:id/threads/extract', async (req, res) => {
+  const p = proj(req.params.id);
+  if (!p) return res.status(404).json({ error: '作品不存在' });
+  const cid = Number(req.body?.chapterId) || 0;
+  const c = cid
+    ? get('SELECT * FROM chapters WHERE id = ? AND project_id = ?', cid, p.id)
+    : get('SELECT * FROM chapters WHERE project_id = ? AND word_count > 0 ORDER BY idx DESC LIMIT 1', p.id);
+  if (!c || !c.content?.trim()) return res.status(400).json({ error: '没有可分析的正文' });
+
+  try {
+    const existing = all('SELECT name FROM threads WHERE project_id = ?', p.id).map((x) => x.name);
+    const { system, user } = P.extractThreads(c, existing);
+    const out = await callAI({
+      task: 'reviewer', step: 'thread_extract', system, user,
+      projectId: p.id, chapterId: c.id,
+      mock: () => M.extractThreads(c),
+    });
+    const arr = parseJSONLoose(out.text);
+    if (!Array.isArray(arr)) return res.status(502).json({ error: 'AI 返回的线索无法解析，请重试' });
+    const t = now();
+    const existingSet = new Set(existing);
+    let added = 0;
+    for (const x of arr) {
+      const name = String(x?.name || '').trim().slice(0, 60);
+      if (!name || existingSet.has(name)) continue;
+      run(`INSERT INTO threads (project_id, name, kind, status, detail, planted_chapter, last_chapter, created_at, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?)`,
+        p.id, name, THREAD_KINDS.includes(x.kind) ? x.kind : '伏笔', 'planted',
+        String(x.detail || '').slice(0, 400), c.idx, c.idx, t, t);
+      existingSet.add(name);
+      added++;
+    }
+    res.json({ added, chapterIdx: c.idx, threads: all('SELECT * FROM threads WHERE project_id = ? ORDER BY id', p.id) });
+  } catch (e) {
+    res.status(502).json({ error: e.message || '线索提取失败' });
+  }
 });
 
 export default r;

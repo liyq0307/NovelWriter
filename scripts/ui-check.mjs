@@ -37,17 +37,28 @@ try {
   await page.goto(BASE + '/', { waitUntil: 'networkidle2' });
   await sleep(600);
   let t = await text();
-  console.log('书架:', t.includes('我的书架') && t.includes('新建作品') ? 'OK' : 'FAIL\n' + t.slice(0, 300));
-  await shot('01-bookshelf');
+  console.log('书架:', t.includes('我的书架') && t.includes('新建作品') && t.includes('载入示例作品') ? 'OK' : 'FAIL\n' + t.slice(0, 300));
 
-  // 2. 打开第一本书（有完整数据的）
-  const bookCards = await page.$$('.book-card');
-  if (bookCards.length > 1) {
-    await bookCards[0].click();
-    await sleep(900);
-    t = await text();
-    console.log('概览页:', t.includes('本书方向') || t.includes('创作约定') ? 'OK' : 'FAIL\n' + t.slice(0, 300));
-    await shot('02-overview');
+  // 2. 载入示例作品（幂等），进入概览
+  const demoBtn = await page.evaluateHandle(() => [...document.querySelectorAll('button')].find((b) => b.textContent.includes('载入示例')));
+  if (demoBtn && demoBtn.asElement()) {
+    await demoBtn.asElement().click();
+    await sleep(1500);
+  } else {
+    const bookCards = await page.$$('.book-card');
+    if (bookCards.length > 1) { await bookCards[0].click(); await sleep(900); }
+  }
+  t = await text();
+  console.log('概览页:', t.includes('本书方向') || t.includes('创作约定') ? 'OK' : 'FAIL\n' + t.slice(0, 300));
+  await shot('02-overview');
+  const pid = new URL(page.url()).pathname.split('/')[2] || '1';
+
+  // 回到书架补一张有示例书的截图，再进入项目继续检查
+  await page.goto(BASE + '/', { waitUntil: 'networkidle2' });
+  await sleep(600);
+  await shot('01-bookshelf');
+  await page.goto(`${BASE}/p/${pid}`, { waitUntil: 'networkidle2' });
+  await sleep(600);
 
     // 3. 世界手册
     await page.evaluate(() => {
@@ -84,8 +95,14 @@ try {
     });
     await sleep(1000);
     t = await text();
-    console.log('写作台:', t.includes('本章任务') && t.includes('AI 生成本章') ? 'OK' : 'FAIL\n' + t.slice(0, 300));
+    console.log('写作台:', t.includes('本章任务') && t.includes('生成本章') ? 'OK' : 'FAIL\n' + t.slice(0, 300));
     await shot('06-writer');
+
+    // 6.4 切到第四章（示例中尚未写），避免生成测试覆盖第一章示例正文
+    await page.evaluate(() => {
+      [...document.querySelectorAll('.ch-item')].find((x) => x.textContent.includes('四·借火'))?.click();
+    });
+    await sleep(700);
 
     // 6.5 浏览器内真实流式生成（跟随写入 → 自动保存 → 状态同步）
     page.on('dialog', (d) => d.accept());
@@ -102,9 +119,30 @@ try {
       t = await text();
       const words = t.match(/(\d+) 字/);
       console.log('流式生成+自动保存:', genOk && words && Number(words[1]) > 500 ? `OK（${words[1]} 字）` : 'FAIL');
-      console.log('角色状态同步:', t.includes('已同步角色状态') || t.includes('状态同步') ? 'OK' : '（未见提示）');
+      console.log('角色状态同步:', t.includes('已同步角色状态') || t.includes('写后整理') ? 'OK' : '（未见提示）');
       await shot('06b-generated');
     }
+
+    // 6.8 历史版本与批量连写弹窗
+    await page.evaluate(() => {
+      [...document.querySelectorAll('button')].find((b) => b.textContent.trim() === '历史版本')?.click();
+    });
+    await sleep(700);
+    t = await text();
+    console.log('历史版本弹窗:', t.includes('历史版本 · 第') && t.includes('当前正文存档') ? 'OK' : 'FAIL\n' + t.slice(-300));
+    await shot('06c-history');
+    await page.evaluate(() => document.querySelector('.modal button[aria-label="关闭"]')?.click());
+    await sleep(300);
+
+    await page.evaluate(() => {
+      [...document.querySelectorAll('button')].find((b) => b.textContent.trim() === '批量连写')?.click();
+    });
+    await sleep(400);
+    t = await text();
+    console.log('批量连写弹窗:', t.includes('批量连写') && t.includes('起始章') && t.includes('开始连写') ? 'OK' : 'FAIL\n' + t.slice(-300));
+    await shot('06d-batch');
+    await page.evaluate(() => document.querySelector('.modal button[aria-label="关闭"]')?.click());
+    await sleep(300);
 
     // 7. 写作台内点击 AI 检查（有正文后应返回评分）
     const reviewBtn = await page.evaluateHandle(() => [...document.querySelectorAll('button')].find((b) => b.textContent.includes('AI 检查本章')));
@@ -116,6 +154,16 @@ try {
       console.log('AI 检查:', score ? `OK（${score[1]} 分）` : 'FAIL\n' + t.slice(0, 200));
       await shot('07-review');
     }
+
+    // 7.5 伏笔线索
+    await page.evaluate(() => {
+      const links = [...document.querySelectorAll('.project-nav a')];
+      links.find((a) => a.textContent.includes('伏笔线索'))?.click();
+    });
+    await sleep(700);
+    t = await text();
+    console.log('伏笔线索:', t.includes('进行中') && t.includes('从正文补录') ? 'OK' : 'FAIL\n' + t.slice(0, 200));
+    await shot('07b-threads');
 
     // 8. 规则页
     await page.evaluate(() => {
@@ -136,10 +184,9 @@ try {
     t = await text();
     console.log('AI 用量:', t.includes('运行记录') || t.includes('调用次数') ? 'OK' : 'FAIL');
     await shot('09-usage');
-  }
 
   // 10. 新书向导（方向页）
-  await page.goto(BASE + '/p/1/direction', { waitUntil: 'networkidle2' });
+  await page.goto(`${BASE}/p/${pid}/direction`, { waitUntil: 'networkidle2' });
   await sleep(800);
   t = await text();
   console.log('方向页:', t.includes('方向') ? 'OK' : 'FAIL\n' + t.slice(0, 200));
