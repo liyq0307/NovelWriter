@@ -19,7 +19,7 @@ r.put('/settings', (req, res) => {
   const b = req.body || {};
   const prev = getAISettings();
   const next = {
-    provider: b.provider === 'openai' ? 'openai' : 'mock',
+    provider: b.provider === 'openai' || b.provider === 'anthropic' ? b.provider : 'mock',
     baseUrl: String(b.baseUrl || '').trim(),
     apiKey: String(b.apiKey || '').trim() || (b.provider === prev.provider ? prev.apiKey : ''),
     models: {
@@ -44,12 +44,16 @@ r.post('/settings/test', async (req, res) => {
 /** 拉取服务商的模型列表（GET {baseUrl}/models），供设置页下拉选择 */
 r.post('/settings/models', async (req, res) => {
   const b = req.body || {};
+  const provider = b.provider === 'anthropic' ? 'anthropic' : 'openai';
   const baseUrl = String(b.baseUrl || '').trim().replace(/\/+$/, '');
   const apiKey = String(b.apiKey || '').trim();
   if (!baseUrl) return res.status(400).json({ error: '请先填写 API 地址' });
   try {
-    const resp = await fetch(`${baseUrl}/models`, {
-      headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
+    const headers = provider === 'anthropic'
+      ? { ...(apiKey ? { 'x-api-key': apiKey } : {}), 'anthropic-version': '2023-06-01' }
+      : (apiKey ? { Authorization: `Bearer ${apiKey}` } : {});
+    const resp = await fetch(`${baseUrl}/models${provider === 'anthropic' ? '?limit=100' : ''}`, {
+      headers,
       signal: AbortSignal.timeout(20000),
     });
     const text = resp.ok ? '' : (await resp.text().catch(() => '')).slice(0, 300);

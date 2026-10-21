@@ -245,7 +245,7 @@ export interface Rule {
 }
 
 export interface AISettings {
-  provider: 'mock' | 'openai';
+  provider: 'mock' | 'openai' | 'anthropic';
   baseUrl: string;
   apiKey: string;
   models: { planner: string; writer: string; reviewer: string };

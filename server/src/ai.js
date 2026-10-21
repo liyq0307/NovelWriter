@@ -10,6 +10,13 @@ import { countWords } from './util.js';
 import { applyTemplate } from './templates.js';
 
 const DEFAULTS = { provider: 'mock', baseUrl: '', apiKey: '', models: { planner: '', writer: '', reviewer: '' } };
+/** Anthropic 官方接口版本与单次输出上限（Claude 必填 max_tokens） */
+const ANTHROPIC_VERSION = '2023-06-01';
+const ANTHROPIC_MAX_TOKENS = 8192;
+
+function normalizeProvider(p) {
+  return p === 'openai' || p === 'anthropic' ? p : 'mock';
+}
 
 export function getAISettings() {
   const row = get('SELECT value FROM settings WHERE key = ?', 'ai');
@@ -17,7 +24,7 @@ export function getAISettings() {
     try {
       const s = JSON.parse(row.value);
       return {
-        provider: s.provider === 'openai' ? 'openai' : 'mock',
+        provider: normalizeProvider(s.provider),
         baseUrl: s.baseUrl || '',
         apiKey: s.apiKey || '',
         models: {
@@ -32,7 +39,16 @@ export function getAISettings() {
 }
 
 export function isMockMode(s = getAISettings()) {
-  return s.provider !== 'openai' || !s.baseUrl;
+  return s.provider === 'mock' || !s.baseUrl;
+}
+
+/** Anthropic 官方接口请求头（x-api-key 鉴权，不用 Bearer） */
+function anthropicHeaders(s) {
+  return {
+    'Content-Type': 'application/json',
+    'x-api-key': s.apiKey,
+    'anthropic-version': ANTHROPIC_VERSION,
+  };
 }
 
 function modelFor(task, s) {
@@ -149,6 +165,81 @@ async function chatCompletion(s, model, call) {
 }
 
 /**
+ * Anthropic 官方 Messages API 流式调用。
+ * 与 OpenAI 协议差异：x-api-key 鉴权、system 独立字段、max_tokens 必填，
+ * SSE 事件为 content_block_delta（delta.text_delta）而不是 choices[].delta。
+ */
+async function anthropicCompletion(s, model, call) {
+  const url = s.baseUrl.replace(/\/+$/, '') + '/messages';
+  const body = {
+    model,
+    max_tokens: call.maxTokens ?? ANTHROPIC_MAX_TOKENS,
+    messages: [{ role: 'user', content: call.user }],
+    stream: true,
+    temperature: Math.min(1, Math.max(0, call.temperature ?? 0.85)),
+  };
+  if (call.system) body.system = call.system;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: anthropicHeaders(s),
+    body: JSON.stringify(body),
+    signal: call.signal ? AbortSignal.any([call.signal, AbortSignal.timeout(600_000)]) : AbortSignal.timeout(600_000),
+  });
+  if (!res.ok) {
+    const t = await res.text().catch(() => '');
+    throw new Error(`模型接口错误 HTTP ${res.status}：${t.slice(0, 300)}`);
+  }
+  let text = '';
+  let usageRaw = null;
+  const dec = new TextDecoder();
+  let buf = '';
+  for await (const chunk of res.body) {
+    buf += dec.decode(chunk, { stream: true });
+    let idx;
+    while ((idx = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, idx).trim();
+      buf = buf.slice(idx + 1);
+      if (!line.startsWith('data:')) continue;
+      const data = line.slice(5).trim();
+      if (!data) continue;
+      let j;
+      try { j = JSON.parse(data); } catch { continue; }
+      if (j.type === 'content_block_delta') {
+        const delta = j.delta;
+        if (delta?.type === 'text_delta' && delta.text) {
+          text += delta.text;
+          call.onDelta?.(delta.text);
+        }
+      } else if (j.type === 'message_start' && j.message?.usage) {
+        usageRaw = { ...j.message.usage };
+      } else if (j.type === 'message_delta' && j.usage) {
+        usageRaw = { ...(usageRaw || {}), ...j.usage };
+      } else if (j.type === 'error') {
+        throw new Error(`模型接口错误：${j.error?.message || '流式返回异常'}`);
+      }
+    }
+  }
+  let usage;
+  if (usageRaw && (usageRaw.input_tokens != null || usageRaw.output_tokens != null)) {
+    const cacheRead = usageRaw.cache_read_input_tokens || 0;
+    usage = {
+      /* Anthropic 的 input_tokens 不含缓存部分，这里换算成与 OpenAI 一致的「总输入」 */
+      input_tokens: (usageRaw.input_tokens || 0) + (usageRaw.cache_creation_input_tokens || 0) + cacheRead,
+      output_tokens: usageRaw.output_tokens || 0,
+      cached_tokens: cacheRead,
+    };
+  } else {
+    usage = {
+      input_tokens: estimateTokens(call.system) + estimateTokens(call.user),
+      output_tokens: estimateTokens(text),
+      cached_tokens: 0,
+      estimated: true,
+    };
+  }
+  return { text, usage };
+}
+
+/**
  * 统一调用入口。
  * call: { task, step, system, user, projectId, chapterId, temperature, stream, onDelta, mock }
  * mock: () => string —— mock 模式下由调用方提供演示文本生成器
@@ -184,7 +275,9 @@ export async function callAI(call) {
         estimated: true,
       };
     } else {
-      const out = await chatCompletion(s, model, call);
+      const out = s.provider === 'anthropic'
+        ? await anthropicCompletion(s, model, call)
+        : await chatCompletion(s, model, call);
       text = out.text;
       usage = out.usage;
     }
@@ -196,6 +289,47 @@ export async function callAI(call) {
   }
 }
 
+/** Anthropic 连接测试（非流式） */
+async function testAnthropicConnection(s, model, t0) {
+  const url = s.baseUrl.replace(/\/+$/, '') + '/messages';
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: anthropicHeaders(s),
+    body: JSON.stringify({
+      model,
+      max_tokens: 20,
+      temperature: 0,
+      system: '你是连接测试助手。',
+      messages: [{ role: 'user', content: '请只回复四个字：连接成功' }],
+    }),
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (!res.ok) {
+    const t = await res.text().catch(() => '');
+    return { ok: false, error: `HTTP ${res.status}：${t.slice(0, 300)}` };
+  }
+  const j = await res.json();
+  const reply = (Array.isArray(j.content) ? j.content : [])
+    .filter((b) => b?.type === 'text')
+    .map((b) => b.text)
+    .join('')
+    .trim()
+    .slice(0, 50);
+  const u = j.usage;
+  return {
+    ok: true,
+    model,
+    reply: reply || '（空回复）',
+    usage: u
+      ? {
+        input_tokens: (u.input_tokens || 0) + (u.cache_creation_input_tokens || 0) + (u.cache_read_input_tokens || 0),
+        output_tokens: u.output_tokens || 0,
+      }
+      : null,
+    durationMs: Date.now() - t0,
+  };
+}
+
 /** 连接测试：可用传入配置测试，不落库 */
 export async function testConnection(override = {}) {
   const saved = getAISettings();
@@ -205,12 +339,13 @@ export async function testConnection(override = {}) {
     apiKey: override.apiKey || saved.apiKey,
   };
   const model = override.model || saved.models.planner || saved.models.writer;
-  if (s.provider !== 'openai' || !s.baseUrl) {
+  if (s.provider === 'mock' || !s.baseUrl) {
     return { ok: true, mock: true, reply: 'Mock 演示模式运行中，无需外部连接。' };
   }
   if (!model) return { ok: false, error: '请先填写要测试的模型名称' };
   const t0 = Date.now();
   try {
+    if (s.provider === 'anthropic') return await testAnthropicConnection(s, model, t0);
     const url = s.baseUrl.replace(/\/+$/, '') + '/chat/completions';
     const res = await fetch(url, {
       method: 'POST',

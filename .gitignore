@@ -10,8 +10,9 @@ data/
 .DS_Store
 Thumbs.db
 
-# AutoClaw 工作区运行状态（后台日志、附件缓存）
+# ide
 .zwork/
+.freebuff/
 
 # 本地环境变量（若有）
 .env

@@ -15,6 +15,13 @@ const VENDORS = [
 ];
 const CUSTOM = '自定义';
 
+/** Anthropic Claude 官方 Messages API（非 OpenAI 协议，服务端单独适配） */
+const CLAUDE = {
+  name: 'Anthropic Claude',
+  baseUrl: 'https://api.anthropic.com/v1',
+  models: ['claude-sonnet-5-5', 'claude-opus-5-5', 'claude-haiku-5-5'],
+};
+
 export default function Settings() {
   const [s, setS] = useState<AISettings | null>(null);
   const [tab, setTab] = useState<'model' | 'data'>('model');
@@ -76,7 +83,28 @@ export default function Settings() {
     }
   };
 
-  const vendorModels = remoteModels.length ? remoteModels : (VENDORS.find((v) => v.name === vendor)?.models || []);
+  const vendorModels = remoteModels.length
+    ? remoteModels
+    : (s.provider === 'anthropic' ? CLAUDE.models : VENDORS.find((v) => v.name === vendor)?.models || []);
+
+  /** 切换接入方式：Claude 直连与 OpenAI 兼容接口的地址、模型互不串用 */
+  const changeProvider = (provider: AISettings['provider']) => {
+    if (provider === s.provider) return;
+    setTestResult(null);
+    setRemoteModels([]);
+    setModelMsg(null);
+    if (provider === 'anthropic') {
+      setVendor(CUSTOM);
+      setS({ ...s, provider, baseUrl: CLAUDE.baseUrl, models: { planner: CLAUDE.models[0], writer: CLAUDE.models[0], reviewer: CLAUDE.models[0] } });
+      return;
+    }
+    if (provider === 'openai' && s.baseUrl.startsWith(CLAUDE.baseUrl)) {
+      setVendor(CUSTOM);
+      setS({ ...s, provider, baseUrl: '', models: { planner: '', writer: '', reviewer: '' } });
+      return;
+    }
+    setS({ ...s, provider });
+  };
 
   /** 切换服务商：同步接口地址，并把三个任务模型重置为该服务的默认模型 */
   const changeVendor = (name: string) => {
@@ -95,7 +123,7 @@ export default function Settings() {
   const fetchModels = async () => {
     setLoadingModels(true); setModelMsg(null);
     try {
-      const r = await api.post('/settings/models', { baseUrl: s.baseUrl, apiKey: s.apiKey });
+      const r = await api.post('/settings/models', { provider: s.provider, baseUrl: s.baseUrl, apiKey: s.apiKey });
       const list = Array.isArray(r.models) ? r.models : [];
       setRemoteModels(list);
       setModelMsg(list.length ? `已获取 ${list.length} 个模型，可在下拉中选择。` : '接口未返回模型列表，可直接手填模型名。');
@@ -106,27 +134,39 @@ export default function Settings() {
     }
   };
 
-  /** 一行模型分配：显示名称 / 实际请求模型 / 用途 */
-  const modelRow = (key: 'planner' | 'writer' | 'reviewer', name: string, use: string) => {
+  /** 一行模型分配：角色 → 用途 → 实际请求模型；没有模型列表时直接手填 */
+  const modelRow = (key: 'planner' | 'writer' | 'reviewer', glyph: string, name: string, use: string) => {
     const value = s.models[key] || '';
     const custom = !vendorModels.includes(value);
+    const placeholder = s.provider === 'anthropic' ? '输入模型名，如 claude-sonnet-5-5' : '输入模型名，如 deepseek-chat';
     return (
-      <div className="model-row" key={key}>
-        <div className="model-name">{name}</div>
-        <div>
-          <select
-            value={custom ? '__custom' : value}
-            onChange={(e) => setModel(key, e.target.value === '__custom' ? '' : e.target.value)}
-          >
-            {vendorModels.map((m) => <option key={m} value={m}>{m}</option>)}
-            <option value="__custom">自定义…</option>
-          </select>
-          {custom && (
-            <input className="mt6" type="text" placeholder="输入模型名" value={value} style={{ width: '100%' }}
-              onChange={(e) => setModel(key, e.target.value)} />
+      <div className="model-item" key={key}>
+        <span className={`model-glyph g-${key}`} aria-hidden="true">{glyph}</span>
+        <div className="model-meta">
+          <div className="model-name">{name}</div>
+          <div className="model-use">{use}</div>
+        </div>
+        <div className={`model-picker ${vendorModels.length && custom ? 'custom' : ''}`}>
+          {vendorModels.length > 0 && (
+            <select
+              aria-label={`${name}的实际请求模型`}
+              value={custom ? '__custom' : value}
+              onChange={(e) => setModel(key, e.target.value === '__custom' ? '' : e.target.value)}
+            >
+              {vendorModels.map((m) => <option key={m} value={m}>{m}</option>)}
+              <option value="__custom">自定义模型…</option>
+            </select>
+          )}
+          {(custom || !vendorModels.length) && (
+            <input
+              type="text"
+              placeholder={placeholder}
+              aria-label={`${name}的模型名`}
+              value={value}
+              onChange={(e) => setModel(key, e.target.value)}
+            />
           )}
         </div>
-        <div className="model-use">{use}</div>
       </div>
     );
   };
@@ -159,13 +199,17 @@ export default function Settings() {
           <div className="card">
             <div className="card-title">供应商</div>
             <div className="radio-row">
-              <div className={`radio-card ${s.provider === 'mock' ? 'on' : ''}`} onClick={() => setS({ ...s, provider: 'mock' })}>
+              <div className={`radio-card ${s.provider === 'mock' ? 'on' : ''}`} onClick={() => changeProvider('mock')}>
                 <div className="radio-title">Mock 演示模式</div>
                 <div className="radio-desc">无需 API Key，内置演示引擎跑通全部流程</div>
               </div>
-              <div className={`radio-card ${s.provider === 'openai' ? 'on' : ''}`} onClick={() => setS({ ...s, provider: 'openai' })}>
+              <div className={`radio-card ${s.provider === 'openai' ? 'on' : ''}`} onClick={() => changeProvider('openai')}>
                 <div className="radio-title">OpenAI 兼容接口</div>
                 <div className="radio-desc">DeepSeek / Kimi / GLM / Qwen / OpenAI 等</div>
+              </div>
+              <div className={`radio-card ${s.provider === 'anthropic' ? 'on' : ''}`} onClick={() => changeProvider('anthropic')}>
+                <div className="radio-title">{CLAUDE.name}</div>
+                <div className="radio-desc">官方 Messages API 直连，Opus / Sonnet / Haiku</div>
               </div>
             </div>
             {s.provider === 'mock' && (
@@ -177,17 +221,27 @@ export default function Settings() {
             )}
           </div>
 
-          {s.provider === 'openai' && (
+          {s.provider !== 'mock' && (
             <>
               <div className="card mt16">
                 <div className="card-title">接口</div>
-                <div className="setting-row">
-                  <span className="setting-label">服务商</span>
-                  <select value={vendor} onChange={(e) => changeVendor(e.target.value)}>
-                    {VENDORS.map((v) => <option key={v.name} value={v.name}>{v.name}</option>)}
-                    <option value={CUSTOM}>自定义（手动填写地址与模型）</option>
-                  </select>
-                </div>
+                {s.provider === 'openai' ? (
+                  <div className="setting-row">
+                    <span className="setting-label">服务商</span>
+                    <select value={vendor} onChange={(e) => changeVendor(e.target.value)}>
+                      {VENDORS.map((v) => <option key={v.name} value={v.name}>{v.name}</option>)}
+                      <option value={CUSTOM}>自定义（手动填写地址与模型）</option>
+                    </select>
+                  </div>
+                ) : (
+                  <div className="setting-row">
+                    <span className="setting-label">服务商</span>
+                    <div className="setting-static">
+                      {CLAUDE.name}
+                      <span className="badge badge-info">Messages API</span>
+                    </div>
+                  </div>
+                )}
                 <div className="setting-row">
                   <span className="setting-label">API 地址</span>
                   <input type="text" placeholder="https://api.example.com/v1" value={s.baseUrl}
@@ -198,36 +252,42 @@ export default function Settings() {
                   <input type="password" placeholder="sk-…" value={s.apiKey}
                     onChange={(e) => setS({ ...s, apiKey: e.target.value })} />
                 </div>
+                {s.provider === 'anthropic' && (
+                  <div className="hint-box" style={{ marginTop: 14 }}>
+                    Key 在 Anthropic 控制台创建，按 tokens 计费；官方接口与 OpenAI 协议不同，这里已直接适配 Messages API。
+                    若走中转 / 聚合网关，请改选「OpenAI 兼容接口」并手填地址与模型名。
+                  </div>
+                )}
               </div>
 
               <div className="card mt16">
-                <div className="card-title">
-                  模型分配
-                  <span className="grow" />
-                  <span className="row" style={{ gap: 8 }}>
-                    <button
-                      className="btn ghost small"
-                      onClick={applyFromPlanner}
-                      disabled={!s.models.planner.trim()}
-                      title="把规划模型的当前选择同步到正文与审阅"
-                    >一键设置</button>
-                    <button className="btn ghost small" onClick={fetchModels} disabled={loadingModels}>
-                      {loadingModels ? <Spinner /> : '获取模型列表'}
-                    </button>
+                <div className="model-card-head">
+                  <div>
+                    <div className="card-title">模型分配</div>
+                    <div className="model-sub">按任务挑模型：贵的写正文，便宜的做规划与审阅。</div>
+                  </div>
+                  <button className="btn small" onClick={fetchModels} disabled={loadingModels}
+                    title="从当前服务商拉取可用模型">
+                    {loadingModels ? <Spinner /> : '↻ 获取模型列表'}
+                  </button>
+                </div>
+                <div className="model-list">
+                  {modelRow('planner', '规', '规划模型', '方向 / 世界 / 角色 / 卷纲')}
+                  {modelRow('writer', '写', '正文模型', '整章生成 / 续写 / 改写')}
+                  {modelRow('reviewer', '审', '审阅模型', '章节检查 / 状态同步')}
+                </div>
+                <div className="model-foot">
+                  <span className="model-hint">
+                    {vendorModels.length
+                      ? '下拉里没有的模型，选「自定义模型…」手动填写。'
+                      : '当前服务商没有模型列表，可直接填写模型名，或点右上角拉取列表。'}
                   </span>
+                  <button className="btn small" onClick={applyFromPlanner}
+                    disabled={!s.models.planner.trim()} title="把规划模型的当前选择同步到正文与审阅">
+                    统一为规划模型
+                  </button>
                 </div>
-                <div className="model-head">
-                  <span>显示名称</span>
-                  <span>实际请求模型</span>
-                  <span>用途</span>
-                </div>
-                {modelRow('planner', '规划模型', '方向 / 世界 / 角色 / 卷纲')}
-                {modelRow('writer', '正文模型', '整章生成 / 续写 / 改写')}
-                {modelRow('reviewer', '审阅模型', '章节检查 / 状态同步')}
                 {modelMsg && <div className="model-msg">{modelMsg}</div>}
-                <div className="hint-box" style={{ marginTop: 14 }}>
-                  便宜的模型做规划与审阅，强模型写正文；下拉里没有的模型选「自定义…」手动填写。
-                </div>
               </div>
             </>
           )}
