@@ -5,7 +5,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { api, sse, countWords } from '../api';
 import { useProject } from './ProjectPage';
-import { Badge, Spinner, ErrorNote, Empty, Modal } from '../components/ui';
+import { Badge, Spinner, ErrorNote, Empty, Modal, Switch } from '../components/ui';
 
 interface Hit {
   id: string;
@@ -68,6 +68,36 @@ function sentenceAt(text: string, index: number) {
 }
 
 const LEVEL_TONE = { ok: 'ok', warn: 'warn', block: 'accent' } as const;
+const LEVEL_COLOR = { ok: 'var(--ok)', warn: 'var(--warn)', block: 'var(--accent)' } as const;
+
+function ScoreRing({ score, level }: { score: number | null; level?: Report['level'] }) {
+  const pct = Math.max(0, Math.min(100, score ?? 0));
+  const color = level ? LEVEL_COLOR[level] : 'var(--line-2)';
+  return (
+    <div
+      className={`flavor-ring ${score == null ? 'idle' : ''}`}
+      style={{ background: `conic-gradient(${color} ${pct}%, #ece6d9 0)` }}
+    >
+      <div className="flavor-ring-inner">
+        <b>{score == null ? '—' : score}</b>
+        <span>{score == null ? '未扫描' : 'AI 腔'}</span>
+      </div>
+    </div>
+  );
+}
+
+function LayerRow({ on, title, desc }: { on: boolean; title: string; desc: string }) {
+  return (
+    <div className="flavor-layer-row">
+      <span className={`flavor-layer-dot ${on ? 'on' : ''}`} />
+      <div className="flavor-layer-copy">
+        <b>{title}</b>
+        <small>{desc}</small>
+      </div>
+      <span className={`flavor-layer-state ${on ? 'on' : ''}`}>{on ? '已启用' : '未启用'}</span>
+    </div>
+  );
+}
 
 export default function Flavor() {
   const { project, reload } = useProject();
@@ -76,6 +106,7 @@ export default function Flavor() {
 
   const [cid, setCid] = useState<number>(chapters[0]?.id ?? 0);
   const [text, setText] = useState('');
+  const [savedText, setSavedText] = useState('');
   const [loaded, setLoaded] = useState(false);
   const [loading, setLoading] = useState(false);
   const [scanning, setScanning] = useState(false);
@@ -85,10 +116,18 @@ export default function Flavor() {
   const [note, setNote] = useState<string | null>(null);
   const [config, setConfig] = useState<FlavorConfig | null>(null);
   const [rewrite, setRewrite] = useState<RewriteState | null>(null);
+  const [sideTab, setSideTab] = useState<'report' | 'settings'>('report');
 
   useEffect(() => {
     api.get('/flavor/settings').then(setConfig).catch(() => {});
   }, []);
+
+  /** 轻提示 3 秒后自动收起，避免一直占着版面 */
+  useEffect(() => {
+    if (!note) return;
+    const t = window.setTimeout(() => setNote(null), 3000);
+    return () => window.clearTimeout(t);
+  }, [note]);
 
   useEffect(() => {
     if (!cid) return;
@@ -96,8 +135,9 @@ export default function Flavor() {
     setLoading(true);
     setErr(null);
     setReport(null);
+    setLoaded(false);
     api.get(`/projects/${project.id}/chapters/${cid}`)
-      .then((c) => { if (alive) { setText(c.content || ''); setLoaded(true); } })
+      .then((c) => { if (alive) { setText(c.content || ''); setSavedText(c.content || ''); setLoaded(true); } })
       .catch((e) => { if (alive) setErr(e.message); })
       .finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
@@ -113,6 +153,7 @@ export default function Flavor() {
     try {
       const r = await api.post(`/projects/${project.id}/chapters/${cid}/flavor-scan`, { text });
       setReport(r);
+      setSideTab('report');
     } catch (e: any) {
       setErr(e.message);
     } finally {
@@ -121,11 +162,13 @@ export default function Flavor() {
   }
 
   async function save() {
-    if (!cid) return;
+    if (!cid || !dirty) return;
+    const content = text;
     setSaving(true);
     setErr(null);
     try {
-      await api.put(`/projects/${project.id}/chapters/${cid}/content?reason=manual`, { content: text });
+      await api.put(`/projects/${project.id}/chapters/${cid}/content?reason=manual`, { content });
+      setSavedText(content);
       setNote('已保存到本章正文');
       await reload();
     } catch (e: any) {
@@ -179,6 +222,11 @@ export default function Flavor() {
     }
   }
 
+  /** 拖动结束 / 键盘调整后再落库，避免滑动过程中反复请求 */
+  function commitThreshold(key: 'warnThreshold' | 'blockThreshold', value: number) {
+    saveConfig({ [key]: value } as Partial<FlavorConfig>);
+  }
+
   async function resetRules() {
     try {
       const saved = await api.post('/flavor/rules/reset');
@@ -204,105 +252,278 @@ export default function Flavor() {
     return out;
   }, [report, text]);
 
+  const allHits = report ? [...report.wordHits, ...report.statHits] : [];
+  const dirty = loaded && text !== savedText;
+
   if (!chapters.length) {
     return <Empty title="还没有章节" desc="先在「架构规划」里拆章，再来做去AI味。" />;
   }
 
   return (
-    <div className="page">
-      <div className="page-head">
+    <div className="page flavor-page">
+      <div className="page-head flavor-head">
         <div>
           <h1>去AI味</h1>
-          <div className="sub">词表命中 → 统计特征 → 模型评分；点正文里的高亮即可逐句改写。</div>
+          <div className="sub">词表命中 → 统计特征 → 模型评分；点正文高亮即可逐句改写。</div>
         </div>
-        <div className="row">
-          <select value={cid} onChange={(e) => setCid(Number(e.target.value))}>
+        <div className="flavor-actions">
+          <select value={cid} onChange={(e) => setCid(Number(e.target.value))} aria-label="选择章节">
             {chapters.map((c) => (
               <option key={c.id} value={c.id}>第{c.idx}章《{c.title || '未命名'}》</option>
             ))}
           </select>
-          <button className="btn primary" onClick={scan} disabled={scanning || !text.trim()}>
-            {scanning ? '扫描中…' : '扫描本章'}
+          <button className="btn primary" onClick={scan} disabled={scanning || !text.trim()} title={!text.trim() ? '先写或粘贴一段正文' : '扫描本章 AI 腔'}>
+            {scanning ? '扫描中…' : report ? '重新扫描' : '扫描本章'}
           </button>
-          <button className="btn" onClick={save} disabled={saving || !cid}>{saving ? '保存中…' : '保存到本章'}</button>
         </div>
       </div>
 
       {err && <ErrorNote error={err} />}
-      {note && <div className="hint-box" style={{ marginBottom: 14 }}><span>{note}</span></div>}
+      {note && <div className="hint-box flavor-note"><span>{note}</span></div>}
 
-      <div className="grid" style={{ gridTemplateColumns: 'minmax(0, 1.55fr) minmax(300px, 1fr)', alignItems: 'start' }}>
-        <div className="editor-card">
-          <div className="editor-toolbar">
-            {report ? (
-              <>
-                <Badge tone={LEVEL_TONE[report.level]}>{report.summary.split('。')[0]}</Badge>
-                <span className="muted small">词表 {report.wordHits.length} · 统计 {report.statHits.length}</span>
-              </>
-            ) : (
-              <span className="muted small">{chapter ? `第${chapter.idx}章《${chapter.title}》` : ''}</span>
-            )}
-            <span className="grow" />
-            <span className="muted small">{countWords(text)} 字</span>
+      <div className="flavor-layout">
+        <section className="editor-card">
+          <div className="flavor-editor-head">
+            <div className="flavor-editor-title">
+              <span className="flavor-chapter-badge">第{chapter?.idx ?? '—'}章</span>
+              <h2>{chapter?.title || '未命名'}</h2>
+            </div>
+            <div className="flavor-editor-meta">
+              {report ? (
+                <Badge tone={LEVEL_TONE[report.level]}>{report.levelText}</Badge>
+              ) : (
+                <span className="flavor-status-idle">待扫描</span>
+              )}
+              {loaded && (
+                <span className={`flavor-save-flag ${dirty ? 'dirty' : ''}`}>
+                  <i />{dirty ? '未保存' : '已保存'}
+                </span>
+              )}
+              <span className="flavor-wordcount"><b>{countWords(text)}</b> 字</span>
+            </div>
           </div>
+
+          {report && (
+            <div className="flavor-legend">
+              <span><i className="flavor-dot word" />词表命中 {report.wordHits.length}</span>
+              <span><i className="flavor-dot stat" />统计特征 {report.statHits.length}</span>
+              <span className="muted">
+                {report.wordHits.length ? '点击黄色高亮可改写所在句' : '统计命中不定位到具体词，可按右侧建议调整'}
+              </span>
+            </div>
+          )}
+
           {loading ? (
-            <div className="loading-block"><Spinner text="正在打开章节…" /></div>
+            <div className="loading-block flavor-loading"><Spinner text="正在打开章节…" /></div>
           ) : report ? (
-            <div className="editor-area" style={{ whiteSpace: 'pre-wrap', overflow: 'auto', maxHeight: '62vh' }}>
-              {segments.map((s, i) => (s.hit ? (
-                <mark
-                  key={i}
-                  title={`${s.hit.reason}\n建议：${s.hit.suggestion}`}
-                  style={{ background: 'var(--warn-soft)', color: 'inherit', borderRadius: 3, cursor: 'pointer', padding: '0 2px' }}
-                  onClick={() => openRewrite(s.hit as Hit)}
-                >
-                  {s.text}
-                </mark>
-              ) : (<span key={i}>{s.text}</span>)))}
+            <div className="flavor-paper">
+              <div className="flavor-paper-inner">
+                {segments.map((s, i) => (s.hit ? (
+                  <mark
+                    key={i}
+                    className="flavor-mark"
+                    title={`${s.hit.reason}\n建议：${s.hit.suggestion}`}
+                    onClick={() => openRewrite(s.hit as Hit)}
+                  >
+                    {s.text}
+                  </mark>
+                ) : (<span key={i}>{s.text}</span>)))}
+              </div>
             </div>
           ) : (
             <textarea
-              className="editor-area"
-              style={{ width: '100%', resize: 'vertical' }}
+              className="flavor-input"
               value={text}
+              spellCheck={false}
               placeholder="本章还没有正文，或直接粘贴一段文字来检测。"
               onChange={(e) => setText(e.target.value)}
             />
           )}
-          {report && (
-            <div className="editor-foot">
-              <button className="btn small" onClick={() => setReport(null)}>回到编辑</button>
-              <span className="muted">点高亮词可改写所在句</span>
+
+          <div className="flavor-editor-foot">
+            {report ? (
+              <button className="btn ghost small" onClick={() => setReport(null)}>← 回到编辑</button>
+            ) : (
+              <span className="muted small">{loaded ? '内容只在本机处理' : '正在读取正文…'}</span>
+            )}
+            <span className="grow" />
+            <span className="muted small">
+              {report ? `命中 ${allHits.length} 处` : '扫描后会标出可改写的位置'}
+            </span>
+            <button
+              className={`btn small ${dirty ? 'primary' : ''}`}
+              onClick={save}
+              disabled={saving || !dirty || !cid}
+            >
+              {saving ? '保存中…' : dirty ? '保存到本章' : '已保存'}
+            </button>
+          </div>
+        </section>
+
+        <aside className="flavor-side">
+          <section className="card flavor-panel">
+            <div className="flavor-tabs" role="tablist" aria-label="检测面板">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={sideTab === 'report'}
+                className="flavor-tab"
+                onClick={() => setSideTab('report')}
+              >
+                检测报告
+                {report ? <span className="flavor-tab-count">{report.score}</span> : null}
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={sideTab === 'settings'}
+                className="flavor-tab"
+                onClick={() => setSideTab('settings')}
+                disabled={!config}
+              >
+                检测设置
+              </button>
+              <span className="grow" />
+              {sideTab === 'settings' ? <span className="flavor-auto">改动即保存</span> : null}
             </div>
-          )}
-        </div>
 
-        <div className="stack">
-          {report && <ReportCard report={report} onRewrite={openRewrite} />}
-
-          {config && (
-            <div className="card">
-              <div className="card-title">检测设置</div>
-              <div className="stack" style={{ gap: 8 }}>
-                <label className="row small"><input type="checkbox" checked={config.wordEnabled} onChange={(e) => saveConfig({ wordEnabled: e.target.checked })} /> 词表命中层</label>
-                <label className="row small"><input type="checkbox" checked={config.statEnabled} onChange={(e) => saveConfig({ statEnabled: e.target.checked })} /> 统计特征层</label>
-                <label className="row small"><input type="checkbox" checked={config.modelEnabled} onChange={(e) => saveConfig({ modelEnabled: e.target.checked })} /> 模型打分层（需 AI 通道）</label>
-                <div className="row small">
-                  <span className="muted" style={{ width: 64 }}>警告阈值</span>
-                  <input type="range" min={0} max={100} value={config.warnThreshold} onChange={(e) => setConfig({ ...config, warnThreshold: Number(e.target.value) })} onMouseUp={(e) => saveConfig({ warnThreshold: Number((e.target as HTMLInputElement).value) })} style={{ flex: 1 }} />
-                  <b>{config.warnThreshold}</b>
+            <div className="flavor-panel-body">
+            {sideTab === 'report' && (report ? (
+              <>
+                <div className="flavor-score">
+                  <ScoreRing score={report.score} level={report.level} />
+                  <div className="flavor-score-copy">
+                    <div className="flavor-score-top">
+                      <b>{report.levelText}</b>
+                      <span className="muted small">阈值 {report.thresholds.warn} / {report.thresholds.block}</span>
+                    </div>
+                    <p className="flavor-summary">{report.summary}</p>
+                  </div>
                 </div>
-                <div className="row small">
-                  <span className="muted" style={{ width: 64 }}>拦截阈值</span>
-                  <input type="range" min={0} max={100} value={config.blockThreshold} onChange={(e) => setConfig({ ...config, blockThreshold: Number(e.target.value) })} onMouseUp={(e) => saveConfig({ blockThreshold: Number((e.target as HTMLInputElement).value) })} style={{ flex: 1 }} />
-                  <b>{config.blockThreshold}</b>
+
+                <div className="flavor-metrics">
+                  <div><span>词表</span><b>{report.stats.wordScore}</b></div>
+                  <div><span>统计</span><b>{report.stats.statScore}</b></div>
+                  <div><span>模型</span><b>{report.modelScore ?? '—'}</b></div>
+                </div>
+
+                {report.modelNote && <div className="flavor-model-note">模型建议：{report.modelNote}</div>}
+
+                <div className="flavor-hits-head">
+                  <b>命中明细</b>
+                  <span className="chip">{allHits.length}</span>
+                </div>
+                {allHits.length ? (
+                  <div className="flavor-hits">
+                    {allHits.map((h) => (
+                      <div key={h.id} className={`flavor-hit ${h.type}`}>
+                        <div className="flavor-hit-top">
+                          <Badge tone={h.type === 'word' ? 'warn' : 'info'}>{h.type === 'word' ? '词表' : '统计'}</Badge>
+                          <b>{h.phrase}</b>
+                          {h.type === 'word' && (
+                            <button className="btn ghost small" onClick={() => openRewrite(h)}>改写本句</button>
+                          )}
+                        </div>
+                        <div className="flavor-hit-reason">{h.reason}</div>
+                        {h.suggestion ? <div className="flavor-hit-suggestion">建议：{h.suggestion}</div> : null}
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="flavor-clear">✓ 没有命中，本章 AI 腔很轻。</div>
+                )}
+              </>
+            ) : (
+              <>
+                <div className="flavor-score">
+                  <ScoreRing score={null} />
+                  <div className="flavor-score-copy">
+                    <div className="flavor-score-top"><b>还没有检测</b></div>
+                    <p className="flavor-summary">扫描会同时检查词表命中与句式统计；开启模型层后，还会让 AI 给出整体评分。</p>
+                  </div>
+                </div>
+                <div className="flavor-layer-list">
+                  <LayerRow on={!!config?.wordEnabled} title="词表命中层" desc="禁用表达、套路化用词" />
+                  <LayerRow on={!!config?.statEnabled} title="统计特征层" desc="句长、句首复读、段落节奏" />
+                  <LayerRow on={!!config?.modelEnabled} title="模型打分层" desc="需要可用的 AI 通道" />
+                </div>
+                <div className="flavor-empty-hint">点击右上角「扫描本章」开始检测。检测结果不会改动正文，只有你确认改写后才会变化。</div>
+              </>
+            ))}
+
+            {sideTab === 'settings' && config && (
+              <div className="flavor-settings-body">
+              <div className="flavor-toggle-list">
+                <div className="flavor-toggle">
+                  <div className="flavor-toggle-copy">
+                    <b>词表命中层</b>
+                    <small>禁用表达、套路化用词</small>
+                  </div>
+                  <Switch checked={config.wordEnabled} onChange={(v) => saveConfig({ wordEnabled: v })} />
+                </div>
+                <div className="flavor-toggle">
+                  <div className="flavor-toggle-copy">
+                    <b>统计特征层</b>
+                    <small>句长、句首复读、段落节奏</small>
+                  </div>
+                  <Switch checked={config.statEnabled} onChange={(v) => saveConfig({ statEnabled: v })} />
+                </div>
+                <div className="flavor-toggle">
+                  <div className="flavor-toggle-copy">
+                    <b>模型打分层</b>
+                    <small>需要可用的 AI 通道</small>
+                  </div>
+                  <Switch checked={config.modelEnabled} onChange={(v) => saveConfig({ modelEnabled: v })} />
                 </div>
               </div>
-              <details style={{ marginTop: 12 }}>
-                <summary className="small muted" style={{ cursor: 'pointer' }}>词表（{config.rules.filter((x) => x.enabled).length}/{config.rules.length} 启用）</summary>
-                <div className="stack" style={{ gap: 6, marginTop: 8, maxHeight: 260, overflow: 'auto' }}>
+
+              <div className="flavor-thresholds">
+                <div className="flavor-threshold">
+                  <div className="flavor-threshold-head">
+                    <span>警告阈值</span>
+                    <b className="warn">{config.warnThreshold}</b>
+                  </div>
+                  <input
+                    className="flavor-range warn"
+                    type="range"
+                    aria-label="警告阈值"
+                    min={0}
+                    max={100}
+                    value={config.warnThreshold}
+                    onChange={(e) => setConfig({ ...config, warnThreshold: Number(e.target.value) })}
+                    onPointerUp={(e) => commitThreshold('warnThreshold', Number((e.target as HTMLInputElement).value))}
+                    onKeyUp={(e) => commitThreshold('warnThreshold', Number((e.target as HTMLInputElement).value))}
+                  />
+                </div>
+                <div className="flavor-threshold">
+                  <div className="flavor-threshold-head">
+                    <span>拦截阈值</span>
+                    <b>{config.blockThreshold}</b>
+                  </div>
+                  <input
+                    className="flavor-range block"
+                    type="range"
+                    aria-label="拦截阈值"
+                    min={0}
+                    max={100}
+                    value={config.blockThreshold}
+                    onChange={(e) => setConfig({ ...config, blockThreshold: Number(e.target.value) })}
+                    onPointerUp={(e) => commitThreshold('blockThreshold', Number((e.target as HTMLInputElement).value))}
+                    onKeyUp={(e) => commitThreshold('blockThreshold', Number((e.target as HTMLInputElement).value))}
+                  />
+                </div>
+              </div>
+
+              <details className="flavor-words">
+                <summary>
+                  <span>词表</span>
+                  <span className="chip">{config.rules.filter((x) => x.enabled).length}/{config.rules.length} 启用</span>
+                  <span className="grow" />
+                  <span className="flavor-caret">▾</span>
+                </summary>
+                <div className="flavor-word-list">
                   {config.rules.map((rule) => (
-                    <label key={rule.id} className="row small" title={rule.reason}>
+                    <label key={rule.id} className={`flavor-word ${rule.enabled ? 'on' : ''}`} title={rule.reason}>
                       <input
                         type="checkbox"
                         checked={rule.enabled}
@@ -312,27 +533,39 @@ export default function Flavor() {
                     </label>
                   ))}
                 </div>
-                <button className="btn small" style={{ marginTop: 8 }} onClick={resetRules}>恢复默认词表</button>
+                <button className="btn ghost small flavor-reset" onClick={resetRules}>恢复默认词表</button>
               </details>
+              </div>
+            )}
+            {sideTab === 'settings' && !config && (
+              <div className="flavor-panel-loading"><Spinner text="正在读取检测设置…" /></div>
+            )}
             </div>
-          )}
-        </div>
+          </section>
+        </aside>
       </div>
 
       {rewrite && (
         <Modal title="AI 重写该句" onClose={() => setRewrite(null)} wide>
           <div className="stack">
             {rewrite.hit && (
-              <div className="muted small">命中「{rewrite.hit.phrase}」：{rewrite.hit.reason}（{rewrite.hit.suggestion}）</div>
+              <div className="flavor-rewrite-hint">
+                <Badge tone="warn">命中「{rewrite.hit.phrase}」</Badge>
+                <span>{rewrite.hit.reason}</span>
+                {rewrite.hit.suggestion ? <span className="muted">建议：{rewrite.hit.suggestion}</span> : null}
+              </div>
             )}
-            <div>
-              <div className="muted small" style={{ marginBottom: 4 }}>原句</div>
-              <div className="editor-area" style={{ whiteSpace: 'pre-wrap', padding: 12, minHeight: 0 }}>{rewrite.selection}</div>
-            </div>
-            <div>
-              <div className="muted small" style={{ marginBottom: 4 }}>改写</div>
-              <div className="editor-area" style={{ whiteSpace: 'pre-wrap', padding: 12, minHeight: 60 }}>
-                {rewrite.result || (rewrite.streaming ? '生成中…' : '（暂无内容）')}
+            <div className="flavor-compare">
+              <div className="flavor-compare-col">
+                <div className="flavor-compare-label">原句</div>
+                <div className="flavor-compare-body">{rewrite.selection}</div>
+              </div>
+              <div className="flavor-compare-arrow">→</div>
+              <div className="flavor-compare-col">
+                <div className="flavor-compare-label">改写</div>
+                <div className={`flavor-compare-body ${rewrite.streaming ? 'streaming' : ''}`}>
+                  {rewrite.result || (rewrite.streaming ? '生成中…' : '（暂无内容）')}
+                </div>
               </div>
             </div>
             {rewrite.error && <ErrorNote error={rewrite.error} />}
@@ -343,41 +576,6 @@ export default function Flavor() {
             </div>
           </div>
         </Modal>
-      )}
-    </div>
-  );
-}
-
-function ReportCard({ report, onRewrite }: { report: Report; onRewrite: (h: Hit) => void }) {
-  const hits = [...report.wordHits, ...report.statHits];
-  return (
-    <div className="card">
-      <div className="card-title">
-        AI 腔指数 <b style={{ fontSize: 22 }}>{report.score}</b>
-        <Badge tone={LEVEL_TONE[report.level]}>{report.levelText}</Badge>
-      </div>
-      <div className="muted small">
-        词表 {report.stats.wordScore} 分 · 统计 {report.stats.statScore} 分
-        {report.modelScore != null ? ` · 模型 ${report.modelScore} 分` : ''}
-        （警告 {report.thresholds.warn} / 拦截 {report.thresholds.block}）
-      </div>
-      {report.modelNote && <p className="small muted" style={{ marginTop: 8 }}>模型建议：{report.modelNote}</p>}
-      {!hits.length ? (
-        <p className="small muted" style={{ marginTop: 10 }}>没有命中，本章 AI 腔很轻。</p>
-      ) : (
-        <div className="stack" style={{ gap: 8, marginTop: 12, maxHeight: '46vh', overflow: 'auto' }}>
-          {hits.map((h) => (
-            <div key={h.id} style={{ borderBottom: '1px solid var(--line)', paddingBottom: 8 }}>
-              <div className="row small">
-                <b>{h.phrase}</b>
-                <span className="grow" />
-                {h.type === 'word' && <button className="btn small" onClick={() => onRewrite(h)}>改写本句</button>}
-              </div>
-              <div className="muted small" style={{ marginTop: 2 }}>{h.reason}</div>
-              <div className="small" style={{ color: 'var(--ink-2)' }}>建议：{h.suggestion}</div>
-            </div>
-          ))}
-        </div>
       )}
     </div>
   );

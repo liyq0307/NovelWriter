@@ -9,5 +9,5 @@ export const ROOT = path.resolve(__dirname, '..');
 export const HOME = process.env.NW_HOME || ROOT;
 export const DATA_DIR = path.join(HOME, 'data');
 export const DB_PATH = process.env.NW_DB_PATH || path.join(DATA_DIR, 'novelwriter.db');
-export const PORT = Number(process.env.PORT || 3000);
+export const PORT = Number(process.env.PORT || 4680);
 export const HOST = process.env.HOST || '127.0.0.1';

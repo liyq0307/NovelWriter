@@ -1,5 +1,5 @@
 /**
- * 开发启动器：同时运行 服务端(3000) 与 前端 Vite(5173)，Ctrl+C 一并退出。
+ * 开发启动器：同时运行 服务端(4680) 与 前端 Vite(5700)，Ctrl+C 一并退出。
  * 直接以当前 Node 可执行文件拉起两者，不经 npm.cmd（Windows 下 spawn .cmd 会 EINVAL）。
  */
 import { spawn } from 'node:child_process';

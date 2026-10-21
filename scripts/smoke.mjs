@@ -155,6 +155,22 @@ async function main() {
   console.log('▶ 检查与修文');
   const rv = await api('POST', `/projects/${p.id}/chapters/${ch1.id}/review`, {});
   ok('AI 章节检查', typeof rv.review.score === 'number' && Array.isArray(rv.review.issues), `评分 ${rv.review.score} · ${rv.review.issues.length} 个问题`);
+  const ctx = await api('GET', `/projects/${p.id}/chapters/${ch1.id}/context`);
+  ok('本章上下文预览', ctx.promptChars > 0 && ctx.target > 0 && ctx.world.length > 0 && ctx.characters.length > 0,
+    `${ctx.promptChars} 字 / 约 ${ctx.promptTokens} tokens / 召回 ${ctx.recalls.length} 条`);
+  await api('PUT', `/projects/${p.id}/chapters/${ch1.id}/content?force=1&reason=pre-revise`, { content: full });
+  const preRevs = await api('GET', `/projects/${p.id}/chapters/${ch1.id}/revisions`);
+  ok('修文前强制留档', preRevs.some((r) => r.reason === 'pre-revise'));
+  const reviseEvents = await sse(`/projects/${p.id}/chapters/${ch1.id}/revise`, { review: rv.review });
+  const reviseDone = reviseEvents.find((e) => e.ev === 'done');
+  ok('按检查意见修文（流式）', !!reviseDone && reviseDone.data.text.length > 800 && reviseDone.data.mock === true,
+    `${reviseDone?.data.wordCount ?? 0} 字`);
+  const accepted = await api('PUT', `/projects/${p.id}/chapters/${ch1.id}/content?sync=1&reason=revise`, { content: reviseDone.data.text });
+  ok('修文结果可采纳', accepted.ok === true);
+  const afterRevise = await api('GET', `/projects/${p.id}/chapters/${ch1.id}`);
+  ok('修文后旧检查失效', afterRevise.review === null);
+  const reviseRevs = await api('GET', `/projects/${p.id}/chapters/${ch1.id}/revisions`);
+  ok('修文自动留档', reviseRevs.some((r) => r.reason === 'revise'));
   const cont = await sse(`/projects/${p.id}/chapters/${ch1.id}/continue`, { content: full, cursor: full.length, target: 300 });
   const contDone = cont.find((e) => e.ev === 'done');
   ok('光标续写（流式）', !!contDone && contDone.data.text.length > 100);

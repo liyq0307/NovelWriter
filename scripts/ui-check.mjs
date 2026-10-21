@@ -1,12 +1,12 @@
 /**
  * UI 冒烟检查：用本机 Edge 无头模式走一遍主要页面并截图。
- * 前提：服务端已运行在 127.0.0.1:3000（生产模式托管 client/dist）。
+ * 前提：服务端已运行在 127.0.0.1:4680（生产模式托管 client/dist）。
  */
 import puppeteer from 'puppeteer-core';
 import fs from 'node:fs';
 
 const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
-const BASE = 'http://127.0.0.1:3000';
+const BASE = 'http://127.0.0.1:4680';
 const OUT = 'docs/ui';
 
 fs.mkdirSync(OUT, { recursive: true });

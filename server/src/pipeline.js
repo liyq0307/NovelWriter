@@ -284,7 +284,7 @@ const REVISION_LIMIT = 80;
 /**
  * 保存一条正文快照。
  * 自动保存默认 60 秒内合并，避免防抖保存制造大量无意义版本；
- * 生成 / 批量 / 回滚等关键节点用 force=true 强制留痕。
+ * 生成 / 批量 / 修文 / 回滚等关键节点用 force=true 强制留痕。
  */
 export function snapshotChapter(projectId, chapterId, content, wc, reason = 'autosave', force = false) {
   const last = get('SELECT * FROM chapter_revisions WHERE chapter_id = ? ORDER BY id DESC LIMIT 1', chapterId);
@@ -332,6 +332,11 @@ export async function saveChapterContent(p, c, content, opts = {}) {
 
   run('UPDATE chapters SET content = ?, word_count = ?, status = ?, updated_at = ? WHERE id = ?',
     text, wc, newStatus, now(), c.id);
+
+  /* 正文被生成 / 批量 / 回滚 / 修文改动后，旧的检查结论已失效，避免 UI 继续展示旧评分 */
+  if (['generate', 'batch', 'restore', 'revise', 'clear'].includes(reason)) {
+    run('UPDATE chapters SET review = NULL WHERE id = ?', c.id);
+  }
 
   if (wc > 0) {
     run(`UPDATE projects SET status = 'writing', updated_at = ?

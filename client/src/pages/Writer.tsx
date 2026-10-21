@@ -1,20 +1,34 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api, sse, countWords, cnNum, fmtTime, REVISION_REASON_NAMES, THREAD_STATUS_NAMES } from '../api';
 import { useProject } from './ProjectPage';
 import { Modal, Field, Spinner, ErrorNote, Empty, ConfirmButton, Badge } from '../components/ui';
-import type { Batch, Chapter, Review, Revision } from '../types';
+import type { Batch, Chapter, ChapterContextPreview, Review, Revision } from '../types';
 
 type SaveState = 'idle' | 'dirty' | 'saving' | 'saved';
 
 interface PreviewState {
-  mode: 'write' | 'continue' | 'rewrite';
+  mode: 'write' | 'continue' | 'rewrite' | 'revise';
   text: string;
   streaming: boolean;
   /** 采纳时把文本插入/替换到哪里 */
   at?: number;
   selStart?: number;
   selEnd?: number;
+}
+
+const RECALL_KIND_NAMES: Record<string, string> = {
+  world: '世界', character: '角色', chapter: '章节', fact: '事实', thread: '线索',
+};
+
+function CtxSection({ title, count, hint, children }: { title: string; count: number; hint?: string; children: ReactNode }) {
+  return (
+    <section className="ctx-section">
+      <h4>{title}<span className="muted small">{count}</span></h4>
+      {count ? children : <div className="ctx-empty">{hint || '无'}</div>}
+    </section>
+  );
 }
 
 export default function Writer() {
@@ -26,7 +40,7 @@ export default function Writer() {
   const [ch, setCh] = useState<Chapter | null>(null);
   const [content, setContent] = useState('');
   const [saveState, setSaveState] = useState<SaveState>('idle');
-  const [streaming, setStreaming] = useState<null | 'write' | 'continue' | 'rewrite'>(null);
+  const [streaming, setStreaming] = useState<null | 'write' | 'continue' | 'rewrite' | 'revise'>(null);
   const [preview, setPreview] = useState<PreviewState | null>(null);
   const [follow, setFollow] = useState(true);
   const [err, setErr] = useState<string | null>(null);
@@ -40,6 +54,12 @@ export default function Writer() {
   const [revisions, setRevisions] = useState<Revision[] | null>(null);
   const [revPreview, setRevPreview] = useState<{ rev: Revision; content: string } | null>(null);
   const [busyRev, setBusyRev] = useState(false);
+
+  /* 本章上下文预览 */
+  const [contextOpen, setContextOpen] = useState(false);
+  const [contextData, setContextData] = useState<ChapterContextPreview | null>(null);
+  const [contextLoading, setContextLoading] = useState(false);
+  const [contextErr, setContextErr] = useState<string | null>(null);
 
   /* 批量连写 */
   const [batchOpen, setBatchOpen] = useState(false);
@@ -76,6 +96,7 @@ export default function Writer() {
     setCh(c);
     setContent(c.content || '');
     setSaveState('idle');
+    setContextOpen(false);
   }, [pid, chapterId]);
 
   useEffect(() => {
@@ -184,7 +205,7 @@ export default function Writer() {
           try {
             setSaveState('saving');
             await doSave(finalText, true, 'generate');
-            setCh((c) => (c ? { ...c, content: finalText, word_count: countWords(finalText) } : c));
+            setCh((c) => (c ? { ...c, content: finalText, word_count: countWords(finalText), review: null } : c));
             setSaveState('saved');
           } catch (e: any) {
             setSaveState('dirty');
@@ -273,13 +294,14 @@ export default function Writer() {
 
   const acceptPreview = async () => {
     if (!preview || !ch) return;
+    const mode = preview.mode;
     let next = content;
-    if (preview.mode === 'write') {
+    if (mode === 'write' || mode === 'revise') {
       next = preview.text;
-    } else if (preview.mode === 'continue') {
+    } else if (mode === 'continue') {
       const at = preview.at ?? content.length;
       next = content.slice(0, at) + preview.text + content.slice(at);
-    } else if (preview.mode === 'rewrite') {
+    } else if (mode === 'rewrite') {
       const s = preview.selStart ?? 0;
       const e = preview.selEnd ?? 0;
       next = content.slice(0, s) + preview.text + content.slice(e);
@@ -288,9 +310,14 @@ export default function Writer() {
     setContent(next);
     setSaveState('saving');
     try {
-      await doSave(next, preview.mode === 'write', preview.mode === 'write' ? 'generate' : 'manual');
-      setCh((c) => (c ? { ...c, content: next, word_count: countWords(next) } : c));
+      const r = await doSave(next, mode === 'write' || mode === 'revise', mode === 'write' ? 'generate' : mode === 'revise' ? 'revise' : 'manual');
+      setCh((c) => (c ? { ...c, content: next, word_count: countWords(next), review: mode === 'write' || mode === 'revise' ? null : c.review } : c));
       setSaveState('saved');
+      if (mode === 'revise') {
+        setNote(r.syncError
+          ? `修文已采纳，但写后整理失败：${r.syncError}`
+          : '修文已采纳；旧检查结果已清空，建议重新检查一次。');
+      }
     } catch (e: any) {
       setSaveState('dirty');
       setErr(`保存失败：${e.message}`);
@@ -327,6 +354,63 @@ export default function Writer() {
       setErr(e.message);
     } finally {
       setBusySync(false);
+    }
+  };
+
+  /* ---------- 按检查意见修文 ---------- */
+  const runRevise = async () => {
+    const rv = ch?.review;
+    if (!ch || !rv) return;
+    if (!rv.issues.length) { setNote('本次检查没有需要修文的问题。'); return; }
+    if (!window.confirm('将依据最近一次检查的意见重写整章。生成结果先进入预览，不会直接覆盖；原稿会留一个版本。若你之后改过正文，建议先重新检查。继续？')) return;
+    setErr(null); setNote(null);
+    setStreaming('revise');
+    setSaveState('saving');
+    try {
+      /* 强制先给当前正文留档，保证修文后随时能回到原稿 */
+      await api.put(`/projects/${pid}/chapters/${ch.id}/content?force=1&reason=pre-revise`, { content });
+      setCh((c) => (c ? { ...c, content, word_count: countWords(content) } : c));
+      setSaveState('saved');
+    } catch (e: any) {
+      setStreaming(null);
+      setSaveState('dirty');
+      setErr(`修文前保存失败：${e.message}`);
+      return;
+    }
+    let acc = '';
+    await sse(`/projects/${pid}/chapters/${ch.id}/revise`, { review: rv }, {
+      onDelta: (d) => {
+        acc += d.text;
+        setPreview({ mode: 'revise', text: acc, streaming: true });
+      },
+      onDone: (d) => {
+        setStreaming(null);
+        setPreview({ mode: 'revise', text: d.text || acc, streaming: false });
+        if (d.warning) setNote(d.warning);
+        else if (d.mock) setNote('Mock 演示模式：修文返回原文，接入真实模型后才会改写正文。');
+        else setNote('修文完成，请对比后决定是否替换。');
+      },
+      onError: (e) => {
+        setStreaming(null);
+        if (acc) setPreview({ mode: 'revise', text: acc, streaming: false });
+        setErr(e.message);
+      },
+    });
+  };
+
+  /* ---------- 本章上下文 ---------- */
+  const openContext = async () => {
+    if (!ch) return;
+    setContextOpen(true);
+    setContextLoading(true);
+    setContextErr(null);
+    setContextData(null);
+    try {
+      setContextData(await api.get(`/projects/${pid}/chapters/${ch.id}/context`));
+    } catch (e: any) {
+      setContextErr(e.message);
+    } finally {
+      setContextLoading(false);
     }
   };
 
@@ -554,7 +638,7 @@ export default function Writer() {
             {saveState === 'dirty' && <span>有未保存修改（自动保存中）</span>}
             {saveState === 'saved' && <span style={{ color: 'var(--ok)' }}>已保存</span>}
             <span className="grow" />
-            {streaming && <span className="stream-indicator"><span className="pulse" />{streaming === 'write' ? 'AI 正在写本章' : streaming === 'continue' ? 'AI 正在续写' : 'AI 正在改写'}</span>}
+            {streaming && <span className="stream-indicator"><span className="pulse" />{streaming === 'write' ? 'AI 正在写本章' : streaming === 'continue' ? 'AI 正在续写' : streaming === 'revise' ? 'AI 正在按意见修文' : 'AI 正在改写'}</span>}
           </div>
 
           {batch && (batchActive || batch.status === 'error' || batch.status === 'done') && (
@@ -609,12 +693,12 @@ export default function Writer() {
             <div style={{ padding: '0 14px 14px' }}>
               <div className="preview-panel">
                 <div className="preview-head">
-                  <span>{preview.mode === 'write' ? '整章生成结果' : preview.mode === 'continue' ? '续写结果' : '改写结果'}{preview.streaming ? '（流式输出中…）' : ''}</span>
+                  <span>{preview.mode === 'write' ? '整章生成结果' : preview.mode === 'continue' ? '续写结果' : preview.mode === 'revise' ? '修文结果' : '改写结果'}{preview.streaming ? '（流式输出中…）' : ''}</span>
                   <span className="grow" />
                   {!preview.streaming && (
                     <>
                       <button className="btn primary small" onClick={acceptPreview}>
-                        {preview.mode === 'write' ? '替换本章正文' : preview.mode === 'continue' ? '插入到断点' : '替换选中片段'}
+                        {preview.mode === 'write' || preview.mode === 'revise' ? '替换本章正文' : preview.mode === 'continue' ? '插入到断点' : '替换选中片段'}
                       </button>
                       <button className="btn ghost small" onClick={() => setPreview(null)}>放弃</button>
                     </>
@@ -700,6 +784,11 @@ export default function Writer() {
             <span className="muted small">写完正文后，让 AI 编辑做一次质检：任务完成度、一致性、文风与节奏。</span>
           ) : (
             <>
+              {(saveState === 'dirty' || content !== (ch.content || '')) && (
+                <div className="hint-box" style={{ marginBottom: 8, fontSize: 12 }}>
+                  正文已有未检查的改动，当前评分与问题清单可能过期；按意见修文前建议重新检查。
+                </div>
+              )}
               <div className="row" style={{ gap: 10, marginBottom: 4 }}>
                 <span className="review-score">{review.score}</span>
                 <span className="muted small grow" style={{ lineHeight: 1.7 }}>{review.summary}</span>
@@ -714,6 +803,19 @@ export default function Writer() {
                   {it.suggestion ? <div className="suggestion">建议：{it.suggestion}</div> : null}
                 </div>
               ))}
+              <div className="row mt8" style={{ gap: 8, alignItems: 'flex-start' }}>
+                <button
+                  className="btn small"
+                  disabled={busyAll || !review.issues.length}
+                  onClick={runRevise}
+                  title="按检查意见重写整章，先生成预览，确认后才替换正文"
+                >
+                  {streaming === 'revise' ? <Spinner /> : '按意见修文'}
+                </button>
+                <span className="muted small" style={{ lineHeight: 1.6 }}>
+                  {review.issues.length ? '改完请重新检查' : '本次没有需要修文的问题'}
+                </span>
+              </div>
             </>
           )}
         </div>
@@ -723,6 +825,9 @@ export default function Writer() {
           <div className="muted small" style={{ lineHeight: 1.8 }}>
             正文生成会自动注入：本书创作约定、世界手册设定、出场人物卡与当前状态、全局与本书的写法规则及反 AI 规则、进行中的伏笔线索、最近章节摘要与上一章结尾。
             规则可在「写法规则」页调整。
+          </div>
+          <div className="mt8">
+            <button className="btn ghost small" disabled={busyAll} onClick={openContext}>查看本章上下文 →</button>
           </div>
         </div>
       </aside>
@@ -765,6 +870,116 @@ export default function Writer() {
             </div>
           )}
           <ErrorNote error={err} />
+        </Modal>
+      )}
+
+      {contextOpen && (
+        <Modal title={`本章上下文 · 第${cnNum(ch.idx)}章`} wide onClose={() => setContextOpen(false)}>
+          {contextLoading ? <div className="loading-block"><Spinner text="正在组装上下文…" /></div> : null}
+          <ErrorNote error={contextErr} />
+          {contextData && (
+            <>
+              <div className="ctx-stats">
+                <Badge tone="info">提示词约 {contextData.promptChars.toLocaleString()} 字</Badge>
+                <Badge>≈ {contextData.promptTokens.toLocaleString()} tokens</Badge>
+                <Badge tone="accent">目标 {contextData.target} 字</Badge>
+              </div>
+              <p className="muted small ctx-note">
+                这是「AI 生成本章」时实际注入的资料。修文与续写会在此基础上增减；检索召回按本章任务匹配。缺什么，就去对应页面补。
+              </p>
+
+              <CtxSection title="世界设定" count={contextData.world.length} hint="世界手册里还没有与本章相关的设定">
+                {contextData.world.map((w, i) => (
+                  <div key={i} className="ctx-item">
+                    <div><b>{w.name}</b><span className="muted small"> · {w.category}</span></div>
+                    <div className="ctx-text">{w.content}</div>
+                  </div>
+                ))}
+              </CtxSection>
+
+              <CtxSection title="出场人物" count={contextData.characters.length} hint="任务单没有绑定人物，角色库也为空">
+                {contextData.characters.map((x, i) => (
+                  <div key={i} className="ctx-item">
+                    <div className="row" style={{ gap: 6 }}>
+                      <b>{x.name}</b>
+                      <Badge>{x.role}</Badge>
+                    </div>
+                    {x.status || x.profile ? <div className="ctx-text">{x.status || x.profile}</div> : null}
+                  </div>
+                ))}
+              </CtxSection>
+
+              <CtxSection title="写法规则" count={contextData.styleRules.length} hint="没有启用中的写法规则">
+                {contextData.styleRules.map((x, i) => (
+                  <div key={i} className="ctx-item">
+                    <b>{x.name}</b>
+                    <div className="ctx-text">{x.content}</div>
+                  </div>
+                ))}
+              </CtxSection>
+
+              <CtxSection title="反 AI 规则" count={contextData.antiRules.length} hint="没有启用中的反 AI 规则">
+                {contextData.antiRules.map((x, i) => (
+                  <div key={i} className="ctx-item">
+                    <b>{x.name}</b>
+                    <div className="ctx-text">{x.content}</div>
+                  </div>
+                ))}
+              </CtxSection>
+
+              <CtxSection title="本期禁用表达" count={contextData.flavorWords.length} hint="去AI味词表未启用，或没有符合条件的禁用词">
+                {contextData.flavorWords.map((x, i) => (
+                  <div key={i} className="ctx-item ctx-line">
+                    <span>「{x.phrase}」</span>
+                    <span className="muted small">→ {x.suggestion || '换一种具体写法'}</span>
+                  </div>
+                ))}
+              </CtxSection>
+
+              <CtxSection title="进行中的伏笔线索" count={contextData.threads.length} hint="暂无进行中的伏笔，写后整理会自动记录">
+                {contextData.threads.map((x, i) => (
+                  <div key={i} className="ctx-item">
+                    <div className="row" style={{ gap: 6 }}>
+                      <span className={`thread-status thread-status-${x.status}`}>{THREAD_STATUS_NAMES[x.status] || x.status}</span>
+                      <b>{x.name}</b>
+                    </div>
+                    {x.detail ? <div className="ctx-text">{x.detail}</div> : null}
+                  </div>
+                ))}
+              </CtxSection>
+
+              <CtxSection title="既定事实" count={contextData.facts.length} hint="还没有沉淀中的既定事实">
+                {contextData.facts.map((x, i) => (
+                  <div key={i} className="ctx-item">
+                    <span className="muted small">{x.kind}{x.subject ? ` · ${x.subject}` : ''}</span>
+                    <div className="ctx-text">{x.fact}</div>
+                  </div>
+                ))}
+              </CtxSection>
+
+              <CtxSection title="前情摘要" count={contextData.summaries.length} hint="前面还没有已整理的章节摘要">
+                {contextData.summaries.map((x, i) => (
+                  <div key={i} className="ctx-item">
+                    <b>第{cnNum(x.idx)}章 · {x.title || '未命名'}</b>
+                    <div className="ctx-text">{x.summary}</div>
+                  </div>
+                ))}
+              </CtxSection>
+
+              <CtxSection title="全文检索召回" count={contextData.recalls.length} hint="本章任务没有匹配到额外的世界、角色、摘要或事实">
+                {contextData.recalls.map((x, i) => (
+                  <div key={i} className="ctx-item">
+                    <span className="muted small">[{RECALL_KIND_NAMES[x.kind] || x.kind}]</span> <b>{x.title}</b>
+                    <div className="ctx-text">{x.snippet}</div>
+                  </div>
+                ))}
+              </CtxSection>
+
+              <CtxSection title="上一章结尾" count={contextData.tail ? 1 : 0} hint="前面还没有已写正文的章节">
+                <div className="ctx-item ctx-tail">{contextData.tail}</div>
+              </CtxSection>
+            </>
+          )}
         </Modal>
       )}
 

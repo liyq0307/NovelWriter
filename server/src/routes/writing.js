@@ -39,6 +39,40 @@ r.get('/:id/chapters/:cid', (req, res) => {
   res.json({ ...c, content: c.content || '' });
 });
 
+/* ============ 本章上下文预览（不调用模型） ============ */
+r.get('/:id/chapters/:cid/context', (req, res) => {
+  const p = proj(req.params.id);
+  if (!p) return res.status(404).json({ error: '作品不存在' });
+  const c = chapter(p.id, req.params.cid);
+  if (!c) return res.status(404).json({ error: '章节不存在' });
+
+  const ctx = chapterContext(p, c);
+  const target = chapterTarget(p, c);
+  const { system, user } = P.chapterWrite(p, c, { ...ctx, target });
+  const clip = (v, n) => String(v || '').replace(/\s+/g, ' ').trim().slice(0, n);
+  const styleRules = (ctx.rules || []).filter((x) => x.kind === 'style');
+  const antiRules = (ctx.rules || []).filter((x) => x.kind === 'anti_ai');
+
+  res.json({
+    target,
+    promptChars: system.length + user.length,
+    promptTokens: Math.round((system.length + user.length) / 1.7),
+    prevTitle: ctx.prevTitle || null,
+    tail: clip(ctx.tail, 400),
+    world: (ctx.world || []).map((w) => ({ category: w.category, name: w.name, content: clip(w.content, 220) })),
+    characters: (ctx.useChars || []).map((x) => ({
+      name: x.name, role: x.role, status: clip(x.status, 120), profile: clip(x.profile, 80),
+    })),
+    styleRules: styleRules.map((x) => ({ name: x.name, content: clip(x.content, 180) })),
+    antiRules: antiRules.map((x) => ({ name: x.name, content: clip(x.content, 180) })),
+    flavorWords: (ctx.flavorWords || []).map((x) => ({ phrase: x.phrase, suggestion: clip(x.suggestion, 60) })),
+    threads: (ctx.threads || []).map((x) => ({ name: x.name, status: x.status, detail: clip(x.detail, 160) })),
+    facts: (ctx.facts || []).map((x) => ({ kind: x.kind, subject: x.subject, fact: clip(x.fact, 180) })),
+    summaries: (ctx.summaries || []).map((x) => ({ idx: x.idx, title: x.title, summary: clip(x.summary, 160) })),
+    recalls: (ctx.recalls || []).map((x) => ({ kind: x.kind, title: x.title, snippet: clip(x.snippet, 160) })),
+  });
+});
+
 /* ============ 整章生成（SSE） ============ */
 r.post('/:id/chapters/:cid/write', async (req, res) => {
   const p = proj(req.params.id);
@@ -138,6 +172,56 @@ r.post('/:id/chapters/:cid/rewrite', async (req, res) => {
   res.end();
 });
 
+/* ============ 按检查意见修文（SSE） ============ */
+r.post('/:id/chapters/:cid/revise', async (req, res) => {
+  const p = proj(req.params.id);
+  if (!p) return res.status(404).json({ error: '作品不存在' });
+  const c = chapter(p.id, req.params.cid);
+  if (!c) return res.status(404).json({ error: '章节不存在' });
+  if (!c.content || !c.content.trim()) return res.status(400).json({ error: '本章还没有正文，请先生成或撰写' });
+
+  const review = req.body?.review && typeof req.body.review === 'object' ? req.body.review : c.review;
+  if (!review || !Array.isArray(review.issues) || !review.issues.length) {
+    return res.status(400).json({ error: '请先做一次 AI 检查，或提供要落实的问题清单' });
+  }
+
+  const ctx = chapterContext(p, c);
+  const { system, user } = P.revise(p, c, review, ctx);
+
+  sseInit(res);
+  let closed = false;
+  const ac = new AbortController();
+  res.on('close', () => { if (!res.writableEnded) { closed = true; ac.abort(); } });
+  const send = (event, data) => { if (!closed) res.write(sseFrame(event, data)); };
+
+  send('start', { chapterId: c.id, mode: 'revise', issues: review.issues.length });
+  try {
+    const out = await callAI({
+      task: 'writer', step: 'revise', system, user,
+      projectId: p.id, chapterId: c.id, stream: true, signal: ac.signal,
+      onDelta: (d) => send('delta', { text: d }),
+      mock: () => c.content || '',
+    });
+    const text = String(out.text || '').trim();
+    if (!text) throw new Error('修文模型没有返回正文');
+    const before = countWords(c.content);
+    const after = countWords(text);
+    send('done', {
+      text,
+      wordCount: after,
+      usage: out.usage,
+      model: out.model,
+      mock: out.model === 'mock-1',
+      warning: before && after < before * 0.7
+        ? `修文结果只有原稿的 ${Math.round((after / before) * 100)}%，可能被截断；请对比后再决定是否替换。`
+        : null,
+    });
+  } catch (e) {
+    send('error', { message: e?.message || '修文失败' });
+  }
+  res.end();
+});
+
 /* ============ 章节检查 ============ */
 r.post('/:id/chapters/:cid/review', async (req, res) => {
   const p = proj(req.params.id);
@@ -181,8 +265,8 @@ r.put('/:id/chapters/:cid/content', async (req, res) => {
   const result = await saveChapterContent(p, c, req.body?.content ?? '', {
     reason,
     sync: req.query.sync === '1',
-    /* 生成 / 批量等关键节点必留版本；普通自动保存按 60 秒合并 */
-    forceSnapshot: req.query.force === '1' || reason === 'generate' || reason === 'batch',
+    /* 生成 / 批量 / 修文等关键节点必留版本；普通自动保存按 60 秒合并 */
+    forceSnapshot: req.query.force === '1' || reason === 'generate' || reason === 'batch' || reason === 'revise',
   });
   res.json({ ...result, chapter: chapter(p.id, c.id) });
 });

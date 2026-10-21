@@ -82,6 +82,23 @@ export interface Chapter {
   review: Review | null;
 }
 
+export interface ChapterContextPreview {
+  target: number;
+  promptChars: number;
+  promptTokens: number;
+  prevTitle: string | null;
+  tail: string;
+  world: { category: string; name: string; content: string }[];
+  characters: { name: string; role: string; status: string; profile: string }[];
+  styleRules: { name: string; content: string }[];
+  antiRules: { name: string; content: string }[];
+  flavorWords: { phrase: string; suggestion: string }[];
+  threads: { name: string; status: string; detail: string }[];
+  facts: { kind: string; subject: string; fact: string }[];
+  summaries: { idx: number; title: string; summary: string }[];
+  recalls: { kind: string; title: string; snippet: string }[];
+}
+
 export interface Thread {
   id: number;
   project_id: number;

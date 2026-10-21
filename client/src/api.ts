@@ -30,7 +30,7 @@ export const api = {
 export interface SSEHandlers {
   onStart?: (d: any) => void;
   onDelta?: (d: { text: string }) => void;
-  onDone?: (d: { text: string; wordCount?: number; model?: string }) => void;
+  onDone?: (d: { text: string; wordCount?: number; model?: string; mock?: boolean; warning?: string | null }) => void;
   onError?: (d: { message: string }) => void;
   /** 所有事件的通用回调（批量连写等自定义事件） */
   onEvent?: (event: string, d: any) => void;
@@ -159,6 +159,8 @@ export const REVISION_REASON_NAMES: Record<string, string> = {
   autosave: '自动保存',
   generate: '生成采纳',
   batch: '批量连写',
+  'pre-revise': '修文前原稿',
+  revise: '按意见修文',
   restore: '回滚',
   'restore-prev': '回滚前存档',
   manual: '手动存档',
