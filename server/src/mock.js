@@ -198,8 +198,68 @@ export function continueText(p, c, before, target) {
   return lines.join('\n\n');
 }
 
-export function rewriteText(selection, instruction) {
-  return `【改写演示】按「${clip(instruction, 30)}」调整后的片段：\n\n${selection.split('。').map((s, i) => (s.trim() ? (i % 2 === 0 ? s.trim() + '。' : s.trim().replace(/，/g, '，') + '。') : '')).join('')}`;
+/** Mock 演示用的轻量去味：删掉常见模板词，不输出任何前缀或说明 */
+function demoDeAiText(text) {
+  return String(text || '')
+    .replace(/仿佛|似乎|宛如/g, '')
+    .replace(/缓缓|微微|轻轻|不由得|莫名地?|隐隐|默默地?|静静地?/g, '')
+    .replace(/与此同时|在这瞬间|然而此刻/g, '')
+    .replace(/内心深处|难以言喻|无法形容/g, '')
+    .replace(/[，,]{2,}/g, '，')
+    .replace(/，([。！？])/g, '$1')
+    .trim();
+}
+
+export function rewriteText(selection) {
+  return demoDeAiText(selection) || String(selection || '').trim();
+}
+
+/** 去AI味语义诊断演示：从正文里挑一两句模板化表达，演示问题清单与修复闭环 */
+export function flavorDetect(text) {
+  const sentences = String(text || '')
+    .split(/(?<=[。！？!?…])/u)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const picked = sentences
+    .filter((s) => /仿佛|似乎|嘴角|眼神|深吸一口气|缓缓|不由得/.test(s))
+    .slice(0, 2)
+    .map((s, i) => ({
+      ruleId: i === 0 ? 'anti_template_rhythm' : 'anti_static_padding',
+      ruleName: i === 0 ? '机械排比 / 均匀句式' : '静态动作填充',
+      ruleType: 'risk',
+      severity: 'medium',
+      excerpt: s.slice(0, 80),
+      reason: '（Mock 演示）该句依赖常见 AI 腔模板，信息增量不足。',
+      suggestion: '换成具体动作或可观察的后果。',
+      canAutoRewrite: true,
+    }));
+  return JSON.stringify({
+    riskScore: picked.length ? 56 : 0,
+    summary: picked.length
+      ? `（Mock 演示）发现 ${picked.length} 处模板化表达；配置真实模型后会做完整语义诊断。`
+      : '（Mock 演示）未发现明显的语义级 AI 腔；配置真实模型后会做完整语义诊断。',
+    violations: picked,
+  });
+}
+
+/** 去AI味补丁修复演示：做最小的模板词删除，返回补丁 JSON */
+export function flavorRepairJson(text, issues) {
+  const patches = [];
+  for (const item of issues || []) {
+    const excerpt = String(item.excerpt || '');
+    const replacement = demoDeAiText(excerpt);
+    if (!replacement || replacement === excerpt) continue;
+    patches.push({
+      issueId: item.issueId,
+      targetExcerpt: excerpt,
+      replacement,
+      reason: '（Mock 演示）删去模板词，保留原意。',
+    });
+  }
+  return JSON.stringify({
+    summary: patches.length ? `（Mock 演示）生成 ${patches.length} 处补丁。` : '（Mock 演示）没有可安全替换的补丁。',
+    patches,
+  });
 }
 
 /* ---------- 章节检查 ---------- */

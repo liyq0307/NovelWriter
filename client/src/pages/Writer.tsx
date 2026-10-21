@@ -936,6 +936,15 @@ export default function Writer() {
                 ))}
               </CtxSection>
 
+              <CtxSection title="本书高频 AI 腔（避雷库）" count={contextData.flavorAvoid.length} hint="扫描过的章节还不够多，或避雷库已清空">
+                {contextData.flavorAvoid.map((x, i) => (
+                  <div key={i} className="ctx-item ctx-line">
+                    <span>「{x.phrase}」</span>
+                    <span className="muted small">已出现 {x.hits} 次 → {x.suggestion || '换一种具体写法'}</span>
+                  </div>
+                ))}
+              </CtxSection>
+
               <CtxSection title="进行中的伏笔线索" count={contextData.threads.length} hint="暂无进行中的伏笔，写后整理会自动记录">
                 {contextData.threads.map((x, i) => (
                   <div key={i} className="ctx-item">

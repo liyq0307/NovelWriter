@@ -211,6 +211,36 @@ CREATE TABLE IF NOT EXISTS writing_log (
   PRIMARY KEY (project_id, day)
 );
 
+-- 去AI味扫描留档：同一章节、同一正文只记一次，用于趋势与避雷库
+CREATE TABLE IF NOT EXISTS flavor_scans (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id  INTEGER NOT NULL,
+  chapter_id  INTEGER,
+  chapter_idx INTEGER,
+  content_hash TEXT NOT NULL,
+  score       INTEGER NOT NULL DEFAULT 0,      -- 机械层：词表 + 统计
+  risk_score  INTEGER,                         -- 语义层：模型表达风险
+  level       TEXT NOT NULL DEFAULT 'ok',      -- ok | warn | block
+  words       INTEGER NOT NULL DEFAULT 0,
+  word_hits   INTEGER NOT NULL DEFAULT 0,
+  stat_hits   INTEGER NOT NULL DEFAULT 0,
+  violations  INTEGER NOT NULL DEFAULT 0,
+  summary     TEXT NOT NULL DEFAULT '',
+  created_at  TEXT NOT NULL,
+  UNIQUE(project_id, chapter_id, content_hash)
+);
+
+-- 文风避雷库：章节扫描中反复出现的 AI 腔表达，生成时自动注入提醒
+CREATE TABLE IF NOT EXISTS flavor_avoid_terms (
+  project_id   INTEGER NOT NULL,
+  phrase       TEXT NOT NULL,
+  hits         INTEGER NOT NULL DEFAULT 0,
+  last_chapter INTEGER,
+  suggestion   TEXT NOT NULL DEFAULT '',
+  updated_at   TEXT NOT NULL,
+  PRIMARY KEY (project_id, phrase)
+);
+
 -- 批量连写任务（自动导演简版）：可暂停、恢复、取消
 CREATE TABLE IF NOT EXISTS batches (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -238,11 +268,18 @@ CREATE INDEX IF NOT EXISTS idx_calls_chapter   ON ai_calls(chapter_id);
 CREATE INDEX IF NOT EXISTS idx_rev_chapter     ON chapter_revisions(chapter_id);
 CREATE INDEX IF NOT EXISTS idx_threads_project ON threads(project_id);
 CREATE INDEX IF NOT EXISTS idx_batches_project ON batches(project_id);
+CREATE INDEX IF NOT EXISTS idx_flavor_scan_proj ON flavor_scans(project_id);
+CREATE INDEX IF NOT EXISTS idx_flavor_avoid_proj ON flavor_avoid_terms(project_id);
 CREATE INDEX IF NOT EXISTS idx_facts_project   ON facts(project_id);
 CREATE INDEX IF NOT EXISTS idx_log_day         ON writing_log(day);
 CREATE INDEX IF NOT EXISTS idx_decon_project   ON deconstructions(project_id);
 CREATE INDEX IF NOT EXISTS idx_prompt_project  ON prompt_templates(project_id);
 CREATE INDEX IF NOT EXISTS idx_search_doc_proj ON search_docs(project_id);
+
+-- 去AI味趋势按章保留最新一条；清理旧版本可能留下的同章重复扫描
+DELETE FROM flavor_scans WHERE id NOT IN (
+  SELECT MAX(id) FROM flavor_scans GROUP BY project_id, IFNULL(chapter_id, -1)
+);
 `);
 
 export const now = () => new Date().toISOString();

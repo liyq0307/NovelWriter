@@ -66,6 +66,9 @@ r.get('/:id/chapters/:cid/context', (req, res) => {
     styleRules: styleRules.map((x) => ({ name: x.name, content: clip(x.content, 180) })),
     antiRules: antiRules.map((x) => ({ name: x.name, content: clip(x.content, 180) })),
     flavorWords: (ctx.flavorWords || []).map((x) => ({ phrase: x.phrase, suggestion: clip(x.suggestion, 60) })),
+    flavorAvoid: (ctx.flavorAvoid || []).map((x) => ({
+      phrase: x.phrase, hits: x.hits, suggestion: clip(x.suggestion, 60),
+    })),
     threads: (ctx.threads || []).map((x) => ({ name: x.name, status: x.status, detail: clip(x.detail, 160) })),
     facts: (ctx.facts || []).map((x) => ({ kind: x.kind, subject: x.subject, fact: clip(x.fact, 180) })),
     summaries: (ctx.summaries || []).map((x) => ({ idx: x.idx, title: x.title, summary: clip(x.summary, 160) })),

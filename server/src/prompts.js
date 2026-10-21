@@ -203,6 +203,13 @@ export function chapterWrite(p, c, ctx) {
     for (const r of ctx.flavorWords) parts.push(`- 「${r.phrase}」→ ${r.suggestion || '改写为具体描写'}`);
     parts.push('以上表达不得出现在正文中，用具体动作、感官细节或直接陈述替代。');
   }
+  if (ctx.flavorAvoid?.length) {
+    parts.push('\n【本书高频 AI 腔（历史累计，务必避开）】');
+    for (const r of ctx.flavorAvoid.slice(0, 8)) {
+      parts.push(`- 「${r.phrase}」已出现 ${r.hits ?? 1} 次 → ${r.suggestion || '换成具体动作或可观察的后果'}`);
+    }
+    parts.push('这些表达在本书正文里反复出现，本次生成不得再用；优先写具体动作、可观察后果或直接陈述。');
+  }
   if (ctx.threads?.length) {
     parts.push('\n【伏笔与线索（需承接或回收）】');
     for (const t of ctx.threads.slice(0, 12)) {
@@ -238,12 +245,16 @@ export function continueWrite(p, c, before, target, ctx = {}) {
 4. 只输出正文，不要任何解释或标记。`;
   const threadLine = (ctx.threads || []).slice(0, 6).map((t) => `${t.name}（${t.kind}）`).join('、');
   const flavorLine = (ctx.flavorWords || []).slice(0, 16).map((r) => `「${r.phrase}」`).join('、');
+  const avoidLine = (ctx.flavorAvoid || []).slice(0, 8)
+    .map((r) => `「${r.phrase}」×${r.hits ?? 1}`)
+    .join('、');
   const user = `【作品】
 ${bookBrief(p)}
 
 【本章任务】${c.brief || '（未定）'}${c.hook ? `\n【章末钩子】${c.hook}` : ''}
 ${threadLine ? `\n【可承接的伏笔】${threadLine}` : ''}
 ${flavorLine ? `\n【禁用AI腔表达（不得出现）】${flavorLine}` : ''}
+${avoidLine ? `\n【本书高频 AI 腔（历史累计，不得再用）】${avoidLine}` : ''}
 
 【已有正文（断点前片段）】
 ${clip(before, 1200)}
@@ -274,12 +285,15 @@ ${clip(after, 300)}
 }
 
 /* ============ 8.5 去AI味：单句改写 ============ */
-export function flavorRewrite(selection, hits, before, after) {
+export function flavorRewrite(selection, hits, before, after, lexiconText = '', avoidText = '') {
   const system = `你是中文小说修文师，专门清除「AI 腔」。规则：
-1. 只改写给定片段，不改变情节、人物、信息与叙事视角；
-2. 删掉或替换命中的 AI 腔词，用具体动作、感官与信息差承载情绪；
-3. 句子长短错落，避免排比与万能形容词；
-4. 只输出改写后的正文，不要解释、引号、标记或前后缀。`;
+1. 只改写给定片段，不改变事件事实、顺序、人物关系、立场与叙事视角；
+2. 删掉或替换命中的 AI 腔词，用具体动作、感官信息或可观察的后果承载情绪；
+3. 替换文本中不得出现本书禁用表达；不要删掉「仿佛」却换入「缓缓」这类同类模板词；
+4. 自然化不是口语化：不要用「喉咙发紧、手心出汗」等浅层身体反应伪装自然感；
+5. 不要新增原文没有的设定、人物、线索或硬钩子；细节只能来自原文或给出的上下文；
+6. 句子长短错落，避免排比、万能形容词和总结句；能删就删，不做机械同义替换；
+7. 只输出改写后的正文，不要解释、引号、标记或前后缀。`;
   const hitLines = (hits || []).map((h) => `- 「${h.phrase}」：${h.reason || ''}${h.suggestion ? `（建议：${h.suggestion}）` : ''}`).join('\n');
   const user = `【上下文（之前）】
 ${clip(before, 200) || '（无）'}
@@ -289,11 +303,97 @@ ${clip(selection, 1500)}
 
 【上下文（之后）】
 ${clip(after, 200) || '（无）'}
+${lexiconText ? `\n【本书禁用表达（改写结果中不得出现）】\n${lexiconText}` : ''}
+${avoidText ? `\n【本书高频 AI 腔（历史累计，不得再用）】\n${avoidText}` : ''}
 
 【命中的 AI 腔特征】
 ${hitLines || '（无具体命中，按整体语感去AI化）'}
 
 请只输出改写后的片段。`;
+  return { system, user };
+}
+
+/* ============ 8.6 去AI味：语义诊断（结构化 JSON） ============ */
+export function flavorDetect(text, catalogText, signals = []) {
+  const system = `你是中文小说写法风险编辑，负责检查文本中的套路化、八股感、空泛总结、机械排比、情绪假热闹与模板痕迹；不判断作者是否使用 AI。
+你的任务不是润色，也不是直接重写，而是输出一份可供后续修复流程使用的结构化检测结果。
+
+只输出一个合法 JSON 对象，不要输出 Markdown、解释、注释、代码块或额外文本。
+输出字段必须且只能包括：riskScore, summary, violations。
+
+violations 中每一项必须且只能包含以下字段：
+ruleId（反AI规则目录方括号内的原始 ID；通用问题用 null）, ruleName, ruleType, severity, excerpt, reason, suggestion, canAutoRewrite。
+
+全局硬规则：
+1. excerpt 必须逐字摘自正文中的一段连续原句，不得拼接、改写、缩写或添加省略号；正文中找不到依据就不得报告。
+2. ruleId 只能引用【反AI规则目录】里出现过的 ID，禁止自造编号，也不得把统计标签当规则 ID。
+3. severity 只能是 low、medium、high；按当前段落的影响程度判断，不要单点放大。
+4. suggestion 只写可执行的修改方向，禁止输出完整可复制替换句，禁止使用「例如：……」后接成段正文。
+5. 最多输出 8 条高价值 violation；同类问题合并为一项，不要穷举细碎瑕疵，也不要为凑数量虚构问题。
+6. 模板词与统计线索只是检查线索，单词命中不代表违规；零命中也不代表通过。必须结合上下文、信息增量与人物反应判断。
+7. 正常网文表达、题材修辞、有功能的重复（口头禅、伏笔提示、情绪递进）不是天然缺陷。
+8. 对白中的人物口吻、口头禅与题材化口语，不按叙述层的模板腔处理；只有对白本身空泛、功能性过强或明显失真时才报告。
+9. 同一段正文重复检测时结论应保持一致，不要因为扫描次数改变判断。
+10. 不要建议新增原文没有的设定、人物、事件、线索或编剧式硬钩子。
+
+riskScore 规则：
+1. riskScore 是 0-100 的整数，表示表达风险及其影响范围，不是 AI 生成概率，也不是作者身份判断。
+2. 只有轻微问题不要给高分；没有违规时可以为 0。
+3. 分数要反映整体，而不是按词频机械加分。
+
+summary 规则：
+1. 用简洁中文概括整体检测结论，指出主要风险集中在哪一类问题。
+2. 不要泛泛写「存在一些问题」；没有违规时直接说明。
+
+canAutoRewrite 规则：
+1. 表达层、句式层、轻中度风格偏差通常可为 true。
+2. 涉及剧情结构、事件因果、人物动机或事实变化的，必须为 false；拿不准时也为 false。`;
+
+  const signalText = Array.isArray(signals) && signals.length
+    ? `【机械候选线索：只供语义核对，不代表违规，不按命中加分】\n${JSON.stringify(signals)}`
+    : '';
+  const user = `【反AI规则目录】
+${catalogText || '（无）'}
+${signalText ? '\n' + signalText : ''}
+
+【待检测正文】
+${String(text || '')}`;
+  return { system, user };
+}
+
+/* ============ 8.7 去AI味：按问题清单做局部补丁 ============ */
+export function flavorRepair(text, issues, lexiconText = '', avoidText = '') {
+  const system = `你是中文小说局部修文编辑，负责按已确认的问题清单做最小必要补丁，消除 AI 腔。
+只输出一个合法 JSON 对象：{"summary":"","patches":[{"issueId":"","targetExcerpt":"","replacement":"","reason":""}]}。
+
+全局硬规则：
+1. targetExcerpt 至少六字，必须逐字摘自原文、在全文唯一、同批补丁之间互不重叠。
+2. replacement 只替换 targetExcerpt 这一段，不能输出整章或整段重写；没有必要时 patches 为空。
+3. issueId 必须引用问题清单里的原始编号，不得自造；不要新增问题。
+4. 不得改变事件事实、事件顺序、人物关系、角色立场、信息先后与剧情结果。
+5. 不得引入原文没有的新设定、新人物、新冲突、新线索或编剧式硬钩子；新增的小动作、物件细节也属于新增事实。
+6. suggestion 只表示修改方向，不是可复制文本；禁止照抄 suggestion 中的示例句。
+7. 替换文本中不得出现本书禁用表达；不要删掉「仿佛」却换入「缓缓」这类同类模板词。如果删词后句子不通顺，就改写局部表达，而不是换入另一个模板词。
+8. 自然化不是口语化：不要只在局部加入「很、太、有点、喉咙发紧、手心出汗」等浅层身体反应来伪装自然感。
+9. 优先做最小改动：能删虚词就删，能换准确动作就换，不要为了去味把整段翻一遍。
+10. 保留原题材、视角、语域、人物口吻与有功能的重复；过度改写造成失真比模板感更差。
+11. 自检：新增内容删去后无损则删掉；替换处还原后不更差则不改。`;
+
+  const issueList = (issues || []).map((it, i) => ({
+    issueId: it.issueId || `issue_${i + 1}`,
+    ruleName: it.ruleName || '',
+    excerpt: it.excerpt || '',
+    reason: it.reason || '',
+    suggestion: it.suggestion || '',
+    severity: it.severity || 'medium',
+  }));
+  const user = `【原文】
+${text}
+${lexiconText ? `\n【本书禁用表达（替换文本中不得出现）】\n${lexiconText}` : ''}
+${avoidText ? `\n【本书高频 AI 腔（历史累计，不得再用）】\n${avoidText}` : ''}
+
+【问题清单】
+${JSON.stringify(issueList)}`;
   return { system, user };
 }
 
@@ -319,6 +419,10 @@ export function revise(p, c, review, ctx = {}) {
   if (ctx.flavorWords?.length) {
     parts.push('\n【禁用AI腔表达】');
     for (const r of ctx.flavorWords.slice(0, 16)) parts.push(`- 「${r.phrase}」→ ${r.suggestion || '改写为具体描写'}`);
+  }
+  if (ctx.flavorAvoid?.length) {
+    parts.push('\n【本书高频 AI 腔（历史累计）】');
+    for (const r of ctx.flavorAvoid.slice(0, 8)) parts.push(`- 「${r.phrase}」×${r.hits ?? 1} → ${r.suggestion || '换成具体动作'}`);
   }
   parts.push(`\n【原正文】\n${c.content || ''}`);
   parts.push('\n请输出修改后的完整正文。');

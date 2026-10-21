@@ -11,7 +11,7 @@ import { sseFrame, countWords } from './util.js';
 import {
   chapterContext, chapterTarget, mockCtx, saveChapterContent, reviewChapter, reviseChapter,
 } from './pipeline.js';
-import { getFlavorConfig, scanFlavor } from './flavor.js';
+import { getFlavorConfig, scanFlavor, recordFlavorScan } from './flavor.js';
 
 /** 检查低于该分数时触发一次自动修文 */
 const REVIEW_RETRY_SCORE = 55;
@@ -252,15 +252,20 @@ async function runBatch(id) {
         }
       }
 
-      // 去AI味巡检：只在拦截级别提醒，不自动改写，避免连写中断
+      // 去AI味巡检：只用机械层，避免连写每章再多一次模型调用；命中留档供趋势与避雷库使用
       let flavorScore = null;
       const finalRow = get('SELECT content, word_count FROM chapters WHERE id = ?', ch.id);
       if (finalRow?.content) {
         try {
+          const cfg = { ...getFlavorConfig(), modelEnabled: false };
           const fv = await scanFlavor(finalRow.content, {
-            config: getFlavorConfig(), projectId: p.id, chapterId: ch.id,
+            config: cfg, projectId: p.id, chapterId: ch.id,
           });
           flavorScore = fv.score;
+          recordFlavorScan({
+            projectId: p.id, chapterId: ch.id, chapterIdx: ch.idx,
+            text: finalRow.content, report: fv,
+          });
           if (fv.level === 'block') {
             emit(rt, 'warning', { chapterId: ch.id, message: `第 ${ch.idx} 章 AI 腔指数 ${fv.score}，建议到「去AI味」页处理` });
           }

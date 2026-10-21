@@ -11,7 +11,7 @@ import { callAI } from './ai.js';
 import * as P from './prompts.js';
 import * as M from './mock.js';
 import { parseJSONLoose, countWords } from './util.js';
-import { getFlavorConfig } from './flavor.js';
+import { getFlavorConfig, buildAvoidList } from './flavor.js';
 import { recall } from './search.js';
 
 const chapter = (pid, cid) => get('SELECT * FROM chapters WHERE id = ? AND project_id = ?', Number(cid), Number(pid));
@@ -79,7 +79,10 @@ export function chapterContext(p, c) {
   const world = selectWorld(worldAll, c);
   const flavor = getFlavorConfig();
   const flavorWords = flavor.wordEnabled
-    ? flavor.rules.filter((r) => r.enabled !== false).slice(0, 24)
+    ? flavor.rules.filter((r) => r.enabled !== false).slice(0, 16)
+    : [];
+  const flavorAvoid = flavor.avoidEnabled
+    ? buildAvoidList(p.id, flavor.avoidMinHits, flavor.avoidLimit)
     : [];
   const rules = all(
     'SELECT * FROM style_rules WHERE enabled = 1 AND (project_id IS NULL OR project_id = ?) ORDER BY project_id DESC, id',
@@ -110,7 +113,7 @@ export function chapterContext(p, c) {
     recalls = recall(p.id, `${c.title || ''} ${c.brief || ''} ${c.scenes || ''}`, 5);
   } catch { /* 检索不可用时不影响写作 */ }
   return {
-    world, useChars, rules, summaries, threads, flavorWords, facts, recalls,
+    world, useChars, rules, summaries, threads, flavorWords, flavorAvoid, facts, recalls,
     prevTitle: prev?.title || null,
     tail: prev?.content ? prev.content.slice(-620) : '',
     allChars: chars,

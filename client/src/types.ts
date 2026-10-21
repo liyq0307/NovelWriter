@@ -93,6 +93,7 @@ export interface ChapterContextPreview {
   styleRules: { name: string; content: string }[];
   antiRules: { name: string; content: string }[];
   flavorWords: { phrase: string; suggestion: string }[];
+  flavorAvoid: { phrase: string; hits: number; suggestion: string }[];
   threads: { name: string; status: string; detail: string }[];
   facts: { kind: string; subject: string; fact: string }[];
   summaries: { idx: number; title: string; summary: string }[];
