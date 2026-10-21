@@ -219,6 +219,10 @@ r.post('/:id/chapters/:cid/revisions/:rid/restore', async (req, res) => {
   const rev = get('SELECT * FROM chapter_revisions WHERE id = ? AND project_id = ? AND chapter_id = ?',
     Number(req.params.rid), p.id, c.id);
   if (!rev) return res.status(404).json({ error: '版本不存在' });
+  /* 回滚前先为当前正文留档，避免误覆盖无法找回 */
+  if (String(c.content || '').trim()) {
+    snapshotChapter(p.id, c.id, c.content, c.word_count, 'restore-prev', true);
+  }
   const result = await saveChapterContent(p, c, rev.content, {
     reason: 'restore', sync: false, forceSnapshot: true,
   });

@@ -141,6 +141,9 @@ async function main() {
   const fullRev = revs[revs.length - 1];
   const restored = await api('POST', `/projects/${p.id}/chapters/${ch1.id}/revisions/${fullRev.id}/restore`, {});
   ok('版本回滚', restored.chapter.content.length === full.length && restored.chapter.word_count === done.data.wordCount);
+  const revsAfterRestore = await api('GET', `/projects/${p.id}/chapters/${ch1.id}/revisions`);
+  const prevWc = full.slice(0, 300).replace(/\s/g, '').length;
+  ok('回滚前正文留档', revsAfterRestore.some((r) => r.reason === 'restore-prev' && r.word_count === prevWc));
   const stats = await api('GET', `/stats?projectId=${p.id}`);
   ok('码字统计', stats.days.length === 14 && stats.today > 0 && stats.total > 0, `今日 ${stats.today} 字 · 连续 ${stats.streak} 天`);
   const ext = await api('POST', `/projects/${p.id}/threads/extract`, {});

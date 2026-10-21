@@ -160,6 +160,7 @@ export const REVISION_REASON_NAMES: Record<string, string> = {
   generate: '生成采纳',
   batch: '批量连写',
   restore: '回滚',
+  'restore-prev': '回滚前存档',
   manual: '手动存档',
   clear: '清空',
 };
