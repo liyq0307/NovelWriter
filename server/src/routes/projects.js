@@ -7,7 +7,7 @@ import { all, get, run, now, parseField } from '../db.js';
 import { callAI } from '../ai.js';
 import * as P from '../prompts.js';
 import * as M from '../mock.js';
-import { parseJSONLoose, countWords } from '../util.js';
+import { parseJSONLoose, countWords, normalizeText, isSameFact } from '../util.js';
 import { searchProject, dropProjectIndex } from '../search.js';
 
 const r = Router();
@@ -132,7 +132,7 @@ r.post('/:id/world/generate', async (req, res) => {
   if (!p) return res.status(404).json({ error: '作品不存在' });
   try {
     const entries = all('SELECT * FROM world_entries WHERE project_id = ?', p.id);
-    const { system, user } = P.world(p);
+    const { system, user } = P.world(p, entries);
     const out = await callAI({ task: 'planner', step: 'world', system, user, projectId: p.id, mock: () => M.world(p) });
     const arr = parseJSONLoose(out.text);
     if (!Array.isArray(arr)) return res.status(502).json({ error: 'AI 返回的设定无法解析，请重试', raw: out.text.slice(0, 300) });
@@ -186,7 +186,32 @@ r.delete('/:id/world/:wid', (req, res) => {
   res.json({ ok: true });
 });
 
-/* ============ 既定事实（写后自动抽取，可人工删除） ============ */
+/* ============ 既定事实（写后自动抽取，可人工删除 / 合并重复） ============ */
+
+r.post('/:id/facts/dedupe', (req, res) => {
+  const p = proj(req.params.id);
+  if (!p) return res.status(404).json({ error: '作品不存在' });
+  const rows = all("SELECT * FROM facts WHERE project_id = ? AND status = 'active' ORDER BY id", p.id);
+  const kept = [];
+  const drop = [];
+  for (const row of rows) {
+    const hit = kept.findIndex((k) => isSameFact(row.fact, k.fact));
+    if (hit === -1) {
+      kept.push(row);
+      continue;
+    }
+    // 同一件事保留信息更完整的一条；长度相同则保留更早确立的那条
+    if (normalizeText(row.fact).length > normalizeText(kept[hit].fact).length) {
+      drop.push(kept[hit].id);
+      kept[hit] = row;
+    } else {
+      drop.push(row.id);
+    }
+  }
+  for (const id of drop) run('DELETE FROM facts WHERE id = ?', id);
+  if (drop.length) touch(p.id);
+  res.json({ removed: drop.length, kept: kept.length });
+});
 
 r.delete('/:id/facts/:fid', (req, res) => {
   const row = get('SELECT * FROM facts WHERE id = ? AND project_id = ?', Number(req.params.fid), Number(req.params.id));

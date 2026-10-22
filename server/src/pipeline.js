@@ -10,7 +10,7 @@ import { all, get, run, now } from './db.js';
 import { callAI } from './ai.js';
 import * as P from './prompts.js';
 import * as M from './mock.js';
-import { parseJSONLoose, countWords } from './util.js';
+import { parseJSONLoose, countWords, isSameFact } from './util.js';
 import { getFlavorConfig, buildAvoidList } from './flavor.js';
 import { recall } from './search.js';
 
@@ -172,19 +172,21 @@ export function applyThreadEvents(projectId, chapterIdx, events) {
 
 const FACT_KINDS = ['世界规则', '时间线', '人物', '剧情'];
 
-/** 把写后抽取的既定事实入库，按正文去重 */
+/** 把写后抽取的既定事实入库，按正文去重（含同义改写） */
 export function applyFacts(projectId, chapterIdx, items) {
   let changed = 0;
+  const known = all("SELECT fact FROM facts WHERE project_id = ? AND status = 'active'", projectId).map((f) => f.fact);
   for (const f of Array.isArray(items) ? items : []) {
     const fact = String(f?.fact || '').trim().slice(0, 300);
     if (!fact) continue;
-    if (get('SELECT id FROM facts WHERE project_id = ? AND fact = ?', projectId, fact)) continue;
+    if (known.some((old) => isSameFact(fact, old))) continue;
     const kind = FACT_KINDS.includes(f.kind) ? f.kind : '剧情';
     const subject = String(f.subject || '').trim().slice(0, 60);
     const t = now();
     run(`INSERT INTO facts (project_id, kind, subject, fact, chapter_idx, status, created_at, updated_at)
          VALUES (?,?,?,?,?,?,?,?)`,
       projectId, kind, subject, fact, chapterIdx, 'active', t, t);
+    known.push(fact);
     changed++;
   }
   return changed;

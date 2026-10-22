@@ -1231,6 +1231,54 @@ textarea { resize: vertical; min-height: 74px; line-height: 1.7; }
 .flavor-patch-skipped summary { cursor: pointer; }
 .flavor-patch-skipped-list { margin-top: 6px; line-height: 1.7; }
 
+/* ---------- 世界手册 ---------- */
+.seg-count {
+  display: inline-block; margin-left: 5px; padding: 0 5px;
+  font-size: 10.5px; line-height: 1.6; border-radius: 99px;
+  color: var(--muted); background: rgba(40, 34, 22, 0.06);
+}
+.seg button.on .seg-count { color: var(--accent); background: var(--accent-soft); }
+
+.chip-count { margin-left: 5px; font-size: 10.5px; color: var(--muted); }
+.chip-btn.active .chip-count { color: var(--accent); }
+
+.world-tools {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin-bottom: 16px; padding-bottom: 13px; border-bottom: 1px dashed var(--line);
+}
+input.world-search { width: 240px; flex: none; }
+.world-search::placeholder { color: #b3b6bd; }
+
+.world-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(310px, 1fr)); gap: 14px; align-items: stretch; }
+.world-card { padding: 14px 16px; display: flex; flex-direction: column; gap: 9px; }
+.world-card-head { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.world-glyph {
+  display: inline-flex; width: 22px; height: 22px; border-radius: 6px;
+  background: var(--sidebar); color: #d8b98a; align-items: center; justify-content: center;
+  font-size: 11.5px; flex: none;
+}
+.world-name { font-family: var(--serif); font-size: 15.5px; letter-spacing: 0.3px; }
+.world-cat { font-size: 11px; padding: 1px 7px; }
+.world-actions { display: flex; align-items: center; gap: 2px; opacity: 0.72; transition: opacity 0.15s; }
+.world-card:hover .world-actions, .world-card:focus-within .world-actions { opacity: 1; }
+.world-content { margin: 0; font-size: 13px; line-height: 1.78; color: var(--ink-2); white-space: pre-wrap; }
+
+.fact-panel { padding: 2px 20px; }
+.fact-row { display: flex; align-items: flex-start; gap: 14px; padding: 12px 2px; border-bottom: 1px dashed var(--line); }
+.fact-row:last-child { border-bottom: none; }
+.fact-main { flex: 1; min-width: 0; }
+.fact-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.fact-subject { font-size: 13px; }
+.fact-text { margin-top: 3px; font-size: 12.5px; line-height: 1.75; color: var(--ink-2); }
+.fact-more { padding: 12px 0 14px; text-align: center; border-top: 1px dashed var(--line); }
+
+@media (max-width: 720px) {
+  .world-grid { grid-template-columns: 1fr; }
+  .world-tools > .grow { display: none; }
+  input.world-search { width: 100%; }
+  .world-actions { opacity: 1; }
+}
+
 @media (max-width: 1120px) {
   .flavor-layout { grid-template-columns: 1fr; }
   .flavor-paper { max-height: 48vh; }

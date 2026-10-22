@@ -13,6 +13,10 @@ Thumbs.db
 # ide
 .zwork/
 .freebuff/
+.codegraph/
+.freebuff/
+.omc/
+.claude/
 
 # 本地环境变量（若有）
 .env
