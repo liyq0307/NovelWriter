@@ -78,6 +78,16 @@ interface Report {
   };
   trend?: Trend | null;
   avoidTop?: AvoidTerm[];
+  skill?: string | null;
+  degraded?: boolean | null;
+}
+
+interface SkillInfo {
+  id: string;
+  label: string;
+  version: string;
+  capabilities: string[];
+  source: string[];
 }
 
 interface RuleItem {
@@ -99,8 +109,21 @@ interface FlavorConfig {
   blockThreshold: number;
   avoidMinHits: number;
   avoidLimit: number;
+  skillHumanizer: boolean;
+  skillDeai: boolean;
   rules: RuleItem[];
 }
+
+interface SkillRow {
+  key: 'skillHumanizer' | 'skillDeai';
+  name: string;
+  desc: string;
+}
+
+const SKILL_ROWS: SkillRow[] = [
+  { key: 'skillHumanizer', name: 'humanizer-zh', desc: '词表 · 句式 · 篇章' },
+  { key: 'skillDeai', name: 'de-AI-writing', desc: '叙事层 · 片段改写' },
+];
 
 interface RewriteState {
   hit: Hit | null;
@@ -111,6 +134,8 @@ interface RewriteState {
   streaming: boolean;
   error: string | null;
   flavor?: { before: number; after: number; newHits: string[] };
+  skill?: string;
+  degraded?: boolean;
 }
 
 interface RepairPatch {
@@ -137,6 +162,8 @@ interface RepairResult {
   statAfter: number;
   blockThreshold: number;
   remaining: { phrase: string; severity: Severity; suggestion: string; inDialogue: boolean }[];
+  skill?: string;
+  degraded?: boolean;
 }
 
 type Mark =
@@ -263,7 +290,8 @@ export default function Flavor() {
   const [note, setNote] = useState<string | null>(null);
   const [config, setConfig] = useState<FlavorConfig | null>(null);
   const [rewrite, setRewrite] = useState<RewriteState | null>(null);
-  const [sideTab, setSideTab] = useState<'report' | 'issues' | 'settings'>('report');
+  const [sideTab, setSideTab] = useState<'report' | 'issues'>('report');
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   const [trend, setTrend] = useState<Trend | null>(null);
   const [avoidTop, setAvoidTop] = useState<AvoidTerm[]>([]);
@@ -271,9 +299,11 @@ export default function Flavor() {
   const [selectedIssue, setSelectedIssue] = useState<string | null>(null);
   const [repairing, setRepairing] = useState(false);
   const [repairResult, setRepairResult] = useState<RepairResult | null>(null);
+  const [skills, setSkills] = useState<SkillInfo[]>([]);
 
   useEffect(() => {
     api.get('/flavor/settings').then(setConfig).catch(() => {});
+    api.get('/flavor/skills').then((d) => setSkills(d.skills || [])).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -372,8 +402,8 @@ export default function Flavor() {
         setRewrite((s) => (s ? { ...s, result: acc } : s));
       },
       onDone: (d) => {
-        const flavor = (d as typeof d & { flavor?: RewriteState['flavor'] }).flavor;
-        setRewrite((s) => (s ? { ...s, result: d.text || acc, streaming: false, flavor } : s));
+        const meta = d as typeof d & { flavor?: RewriteState['flavor']; skill?: string; degraded?: boolean };
+        setRewrite((s) => (s ? { ...s, result: d.text || acc, streaming: false, flavor: meta.flavor, skill: meta.skill, degraded: meta.degraded } : s));
       },
       onError: (d) => {
         setRewrite((s) => (s ? { ...s, streaming: false, error: d.message } : s));
@@ -539,10 +569,10 @@ export default function Flavor() {
 
   return (
     <div className="page flavor-page">
-      <div className="page-head flavor-head">
-        <div>
+      <header className="flavor-masthead">
+        <div className="flavor-mast-copy">
           <h1>去AI味</h1>
-          <div className="sub">词表与统计找证据，模型做语义诊断；勾选问题后可整章补丁修复，确认后才写回正文。</div>
+          <p>词表与统计找证据，模型做语义诊断；勾选问题后可整章补丁修复，确认后才写回正文。</p>
         </div>
         <div className="flavor-actions">
           <select value={cid} onChange={(e) => setCid(Number(e.target.value))} aria-label="选择章节">
@@ -550,11 +580,19 @@ export default function Flavor() {
               <option key={c.id} value={c.id}>第{c.idx}章《{c.title || '未命名'}》</option>
             ))}
           </select>
+          <button
+            className="btn flavor-settings-btn"
+            onClick={() => setSettingsOpen(true)}
+            disabled={!config}
+            title="检测层、阈值、避雷库、词表与技能底稿"
+          >
+            检测设置
+          </button>
           <button className="btn primary" onClick={scan} disabled={scanning || !text.trim()} title={!text.trim() ? '先写或粘贴一段正文' : '扫描本章 AI 腔'}>
             {scanning ? '扫描中…' : report ? '重新扫描' : '扫描本章'}
           </button>
         </div>
-      </div>
+      </header>
 
       {err && <ErrorNote error={err} />}
       {note && <div className="hint-box flavor-note"><span>{note}</span></div>}
@@ -586,6 +624,11 @@ export default function Flavor() {
               <span><i className="flavor-dot phrase" />词表命中 {report.wordHits.length} 处 / {report.stats.wordRules} 类</span>
               <span><i className="flavor-dot signal" />统计信号 {report.statHits.length}</span>
               <span><i className="flavor-dot violation" />语义问题 {report.violations.length}</span>
+              <span className={`flavor-skill-state ${report.degraded ? 'degraded' : ''}`}>
+                {report.skill
+                  ? report.degraded ? '技能降级：本次用内置规则' : '语义检测：由 skills 驱动'
+                  : '语义检测：未启用'}
+              </span>
               <span className="muted">
                 {report.violations.length ? '点红色问题可查看原因；点黄色词可改写所在句' : '点击高亮可查看原因或改写'}
               </span>
@@ -695,18 +738,7 @@ export default function Flavor() {
                 问题清单
                 {report && report.violations.length ? <span className="flavor-tab-count">{report.violations.length}</span> : null}
               </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={sideTab === 'settings'}
-                className="flavor-tab"
-                onClick={() => setSideTab('settings')}
-                disabled={!config}
-              >
-                检测设置
-              </button>
               <span className="grow" />
-              {sideTab === 'settings' ? <span className="flavor-auto">改动即保存</span> : null}
             </div>
 
             <div className="flavor-panel-body">
@@ -890,152 +922,210 @@ export default function Flavor() {
               </div>
             )}
 
-            {sideTab === 'settings' && config && (
-              <div className="flavor-settings-body">
-              <div className="flavor-toggle-list">
-                <div className="flavor-toggle">
-                  <div className="flavor-toggle-copy">
-                    <b>词表命中层</b>
-                    <small>禁用表达、套路化用词</small>
-                  </div>
-                  <Switch checked={config.wordEnabled} onChange={(v) => saveConfig({ wordEnabled: v })} />
-                </div>
-                <div className="flavor-toggle">
-                  <div className="flavor-toggle-copy">
-                    <b>统计特征层</b>
-                    <small>句长、句首复读、虚词与副词聚集</small>
-                  </div>
-                  <Switch checked={config.statEnabled} onChange={(v) => saveConfig({ statEnabled: v })} />
-                </div>
-                <div className="flavor-toggle">
-                  <div className="flavor-toggle-copy">
-                    <b>语义诊断层</b>
-                    <small>调用审阅模型，逐条给出原文证据与修改方向</small>
-                  </div>
-                  <Switch checked={config.modelEnabled} onChange={(v) => saveConfig({ modelEnabled: v })} />
-                </div>
-                <div className="flavor-toggle">
-                  <div className="flavor-toggle-copy">
-                    <b>文风避雷库</b>
-                    <small>把章节里反复出现的 AI 腔注入下一次生成</small>
-                  </div>
-                  <Switch checked={config.avoidEnabled} onChange={(v) => saveConfig({ avoidEnabled: v })} />
-                </div>
-              </div>
-
-              <div className="flavor-thresholds">
-                <div className="flavor-threshold">
-                  <div className="flavor-threshold-head">
-                    <span>警告阈值</span>
-                    <b className="warn">{config.warnThreshold}</b>
-                  </div>
-                  <input
-                    className="flavor-range warn"
-                    type="range"
-                    aria-label="警告阈值"
-                    min={0}
-                    max={100}
-                    value={config.warnThreshold}
-                    onChange={(e) => setConfig({ ...config, warnThreshold: Number(e.target.value) })}
-                    onPointerUp={(e) => commitThreshold('warnThreshold', Number((e.target as HTMLInputElement).value))}
-                    onKeyUp={(e) => commitThreshold('warnThreshold', Number((e.target as HTMLInputElement).value))}
-                  />
-                </div>
-                <div className="flavor-threshold">
-                  <div className="flavor-threshold-head">
-                    <span>拦截阈值</span>
-                    <b>{config.blockThreshold}</b>
-                  </div>
-                  <input
-                    className="flavor-range block"
-                    type="range"
-                    aria-label="拦截阈值"
-                    min={0}
-                    max={100}
-                    value={config.blockThreshold}
-                    onChange={(e) => setConfig({ ...config, blockThreshold: Number(e.target.value) })}
-                    onPointerUp={(e) => commitThreshold('blockThreshold', Number((e.target as HTMLInputElement).value))}
-                    onKeyUp={(e) => commitThreshold('blockThreshold', Number((e.target as HTMLInputElement).value))}
-                  />
-                </div>
-              </div>
-
-              {config.avoidEnabled && (
-                <div className="flavor-avoid-settings">
-                  <div className="flavor-avoid-head">
-                    <b>避雷库</b>
-                    <span className="muted small">出现不少于 N 次才注入，最多注入 M 条</span>
-                  </div>
-                  <div className="flavor-avoid-inputs">
-                    <label>
-                      门槛
-                      <input
-                        type="number"
-                        min={1}
-                        max={20}
-                        value={config.avoidMinHits}
-                        onChange={(e) => setConfig({ ...config, avoidMinHits: Number(e.target.value) })}
-                        onBlur={(e) => saveConfig({ avoidMinHits: Number(e.target.value) })}
-                      />
-                    </label>
-                    <label>
-                      条数
-                      <input
-                        type="number"
-                        min={1}
-                        max={25}
-                        value={config.avoidLimit}
-                        onChange={(e) => setConfig({ ...config, avoidLimit: Number(e.target.value) })}
-                        onBlur={(e) => saveConfig({ avoidLimit: Number(e.target.value) })}
-                      />
-                    </label>
-                  </div>
-                  {avoidTop.length ? (
-                    <div className="flavor-avoid-preview">
-                      {avoidTop.slice(0, 10).map((x) => (
-                        <span key={x.phrase} className="flavor-avoid-chip" title={x.suggestion}>
-                          「{x.phrase}」×{x.hits}
-                        </span>
-                      ))}
-                    </div>
-                  ) : (
-                    <div className="muted small flavor-avoid-empty">还没有累积到足够的命中；多扫描几章后会自动出现在生成上下文里。</div>
-                  )}
-                  <ConfirmButton className="btn ghost small flavor-reset" onConfirm={clearAvoid}>清空本书避雷库</ConfirmButton>
-                </div>
-              )}
-
-              <details className="flavor-words">
-                <summary>
-                  <span>词表</span>
-                  <span className="chip">{config.rules.filter((x) => x.enabled).length}/{config.rules.length} 启用</span>
-                  <span className="grow" />
-                  <span className="flavor-caret">▾</span>
-                </summary>
-                <div className="flavor-word-list">
-                  {config.rules.map((rule) => (
-                    <label key={rule.id} className={`flavor-word ${rule.enabled ? 'on' : ''}`} title={`${rule.reason}｜${rule.category}`}>
-                      <input
-                        type="checkbox"
-                        checked={rule.enabled}
-                        onChange={(e) => saveConfig({ rules: config.rules.map((x) => (x.id === rule.id ? { ...x, enabled: e.target.checked } : x)) })}
-                      />
-                      <i className={`flavor-sev-dot ${rule.severity}`} />
-                      <span>{rule.phrase}</span>
-                    </label>
-                  ))}
-                </div>
-                <button className="btn ghost small flavor-reset" onClick={resetRules}>恢复默认词表</button>
-              </details>
-              </div>
-            )}
-            {sideTab === 'settings' && !config && (
-              <div className="flavor-panel-loading"><Spinner text="正在读取检测设置…" /></div>
-            )}
             </div>
           </section>
         </aside>
       </div>
+
+      {settingsOpen && (
+        <Modal title="检测设置" onClose={() => setSettingsOpen(false)} wide>
+          {config ? (
+            <div className="flavor-settings-body">
+              <section className="flavor-settings-section">
+                <div className="flavor-settings-head">
+                  <b>检测层</b>
+                  <span className="muted small">改动即保存</span>
+                </div>
+                <div className="flavor-toggle-list">
+                  <div className="flavor-toggle">
+                    <div className="flavor-toggle-copy">
+                      <b>词表命中层</b>
+                      <small>禁用表达、套路化用词</small>
+                    </div>
+                    <Switch checked={config.wordEnabled} onChange={(v) => saveConfig({ wordEnabled: v })} />
+                  </div>
+                  <div className="flavor-toggle">
+                    <div className="flavor-toggle-copy">
+                      <b>统计特征层</b>
+                      <small>句长、句首复读、虚词与副词聚集</small>
+                    </div>
+                    <Switch checked={config.statEnabled} onChange={(v) => saveConfig({ statEnabled: v })} />
+                  </div>
+                  <div className="flavor-toggle">
+                    <div className="flavor-toggle-copy">
+                      <b>语义诊断层</b>
+                      <small>调用审阅模型，逐条给出原文证据与修改方向</small>
+                    </div>
+                    <Switch checked={config.modelEnabled} onChange={(v) => saveConfig({ modelEnabled: v })} />
+                  </div>
+                  <div className="flavor-toggle">
+                    <div className="flavor-toggle-copy">
+                      <b>文风避雷库</b>
+                      <small>把章节里反复出现的 AI 腔注入下一次生成</small>
+                    </div>
+                    <Switch checked={config.avoidEnabled} onChange={(v) => saveConfig({ avoidEnabled: v })} />
+                  </div>
+                </div>
+              </section>
+
+              <section className="flavor-settings-section">
+                <div className="flavor-settings-head">
+                  <b>阈值</b>
+                  <span className="muted small">分数越过阈值时报告升到警告 / 拦截</span>
+                </div>
+                <div className="flavor-thresholds">
+                  <div className="flavor-threshold">
+                    <div className="flavor-threshold-head">
+                      <span>警告阈值</span>
+                      <b className="warn">{config.warnThreshold}</b>
+                    </div>
+                    <input
+                      className="flavor-range warn"
+                      type="range"
+                      aria-label="警告阈值"
+                      min={0}
+                      max={100}
+                      value={config.warnThreshold}
+                      onChange={(e) => setConfig({ ...config, warnThreshold: Number(e.target.value) })}
+                      onPointerUp={(e) => commitThreshold('warnThreshold', Number((e.target as HTMLInputElement).value))}
+                      onKeyUp={(e) => commitThreshold('warnThreshold', Number((e.target as HTMLInputElement).value))}
+                    />
+                  </div>
+                  <div className="flavor-threshold">
+                    <div className="flavor-threshold-head">
+                      <span>拦截阈值</span>
+                      <b>{config.blockThreshold}</b>
+                    </div>
+                    <input
+                      className="flavor-range block"
+                      type="range"
+                      aria-label="拦截阈值"
+                      min={0}
+                      max={100}
+                      value={config.blockThreshold}
+                      onChange={(e) => setConfig({ ...config, blockThreshold: Number(e.target.value) })}
+                      onPointerUp={(e) => commitThreshold('blockThreshold', Number((e.target as HTMLInputElement).value))}
+                      onKeyUp={(e) => commitThreshold('blockThreshold', Number((e.target as HTMLInputElement).value))}
+                    />
+                  </div>
+                </div>
+              </section>
+
+              {config.avoidEnabled && (
+                <section className="flavor-settings-section">
+                  <div className="flavor-settings-head">
+                    <b>文风避雷库</b>
+                    <span className="muted small">出现不少于 N 次才注入，最多注入 M 条</span>
+                  </div>
+                  <div className="flavor-avoid-settings">
+                    <div className="flavor-avoid-inputs">
+                      <label>
+                        门槛
+                        <input
+                          type="number"
+                          min={1}
+                          max={20}
+                          value={config.avoidMinHits}
+                          onChange={(e) => setConfig({ ...config, avoidMinHits: Number(e.target.value) })}
+                          onBlur={(e) => saveConfig({ avoidMinHits: Number(e.target.value) })}
+                        />
+                      </label>
+                      <label>
+                        条数
+                        <input
+                          type="number"
+                          min={1}
+                          max={25}
+                          value={config.avoidLimit}
+                          onChange={(e) => setConfig({ ...config, avoidLimit: Number(e.target.value) })}
+                          onBlur={(e) => saveConfig({ avoidLimit: Number(e.target.value) })}
+                        />
+                      </label>
+                    </div>
+                    {avoidTop.length ? (
+                      <div className="flavor-avoid-preview">
+                        {avoidTop.slice(0, 10).map((x) => (
+                          <span key={x.phrase} className="flavor-avoid-chip" title={x.suggestion}>
+                            「{x.phrase}」×{x.hits}
+                          </span>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="muted small flavor-avoid-empty">还没有累积到足够的命中；多扫描几章后会自动出现在生成上下文里。</div>
+                    )}
+                    <ConfirmButton className="btn ghost small flavor-reset" onConfirm={clearAvoid}>清空本书避雷库</ConfirmButton>
+                  </div>
+                </section>
+              )}
+
+              <section className="flavor-settings-section">
+                <div className="flavor-settings-head">
+                  <b>词表</b>
+                  <span className="muted small">{config.rules.filter((x) => x.enabled).length}/{config.rules.length} 条启用</span>
+                </div>
+                <details className="flavor-words">
+                  <summary>
+                    <span>展开词条</span>
+                    <span className="grow" />
+                    <span className="flavor-caret">▾</span>
+                  </summary>
+                  <div className="flavor-word-list">
+                    {config.rules.map((rule) => (
+                      <label key={rule.id} className={`flavor-word ${rule.enabled ? 'on' : ''}`} title={`${rule.reason}｜${rule.category}`}>
+                        <input
+                          type="checkbox"
+                          checked={rule.enabled}
+                          onChange={(e) => saveConfig({ rules: config.rules.map((x) => (x.id === rule.id ? { ...x, enabled: e.target.checked } : x)) })}
+                        />
+                        <i className={`flavor-sev-dot ${rule.severity}`} />
+                        <span>{rule.phrase}</span>
+                      </label>
+                    ))}
+                  </div>
+                  <button className="btn ghost small flavor-reset" onClick={resetRules}>恢复默认词表</button>
+                </details>
+              </section>
+
+              <section className="flavor-settings-section">
+                <div className="flavor-settings-head">
+                  <b>技能底稿</b>
+                  <span className="muted small">扫描、改写、修复的提示词均取自这两个开源技能</span>
+                </div>
+                <div className="flavor-skill-list">
+                  {SKILL_ROWS.map((row, i) => {
+                    const on = config[row.key];
+                    const source = skills[0]?.source?.[i] || '';
+                    const ver = (skills[0]?.version.split(' / ')[i] || '').replace(/^[^\d]*/, '');
+                    return (
+                      <div key={row.key} className={`flavor-skill-item ${on ? '' : 'off'}`}>
+                        <span className="flavor-skill-index">0{i + 1}</span>
+                        <span className="flavor-skill-copy">
+                          <span className="flavor-skill-name">{row.name}<em>v{ver}</em></span>
+                          <span className="flavor-skill-desc">{row.desc}</span>
+                        </span>
+                        <span className="grow" />
+                        {on ? (
+                          source
+                            ? <a className="flavor-skill-link" href={source} target="_blank" rel="noreferrer">仓库 ↗</a>
+                            : <span className="flavor-skill-locked">无仓库信息</span>
+                        ) : <span className="flavor-skill-locked">已关闭 · 不可配置</span>}
+                        <Switch checked={on} onChange={(v) => saveConfig({ [row.key]: v })} />
+                      </div>
+                    );
+                  })}
+                </div>
+                {!config.skillHumanizer && !config.skillDeai && (
+                  <div className="flavor-skill-warn">两个技能都已关闭：扫描、改写、修复会自动降级为内置规则。</div>
+                )}
+                <div className="flavor-skill-tip">默认全部开启；关闭后该技能的原文规则不再参与提示词组装。</div>
+              </section>
+            </div>
+          ) : (
+            <div className="flavor-panel-loading"><Spinner text="正在读取检测设置…" /></div>
+          )}
+        </Modal>
+      )}
+
 
       {rewrite && (
         <Modal title="AI 重写该句" onClose={() => setRewrite(null)} wide>
@@ -1060,6 +1150,11 @@ export default function Flavor() {
                 </div>
               </div>
             </div>
+            {rewrite.skill && !rewrite.streaming && (
+              <div className={`flavor-skill-state ${rewrite.degraded ? 'degraded' : ''}`}>
+                {rewrite.degraded ? '技能不可用，本次已降级为内置规则' : '改写提示词由 skills 生成'}
+              </div>
+            )}
             {rewrite.flavor && !rewrite.streaming ? (
               <div className={`flavor-rewrite-score ${rewrite.flavor.after > rewrite.flavor.before || rewrite.flavor.newHits.length ? 'bad' : rewrite.flavor.after < rewrite.flavor.before ? 'good' : ''}`}>
                 机械命中 {rewrite.flavor.before} → {rewrite.flavor.after}
@@ -1085,6 +1180,11 @@ export default function Flavor() {
           <div className="stack">
             <div className="flavor-repair-summary">
               {repairResult.summary || `已生成 ${repairResult.applied} 处补丁`}
+              {repairResult.skill && (
+                <span className={`flavor-skill-state ${repairResult.degraded ? 'degraded' : ''}`}>
+                  {repairResult.degraded ? '技能降级' : 'skills 修复'}
+                </span>
+              )}
             </div>
             <div className={`flavor-repair-score ${repairResult.scoreAfter > repairResult.scoreBefore ? 'bad' : repairResult.scoreAfter < repairResult.scoreBefore ? 'good' : ''}`}>
               <span>机械分</span>

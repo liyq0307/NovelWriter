@@ -73,6 +73,32 @@ export function directions(p, guide = {}) {
   return JSON.stringify(list, null, 2);
 }
 
+/* ---------- 方向融合 ---------- */
+export function directionsMerge(p, candidates = [], note = '') {
+  const core = coreOf(p);
+  const first = candidates[0] || {};
+  const uniq = (arr) => [...new Set(arr.filter(Boolean))];
+  const joined = (arr) => uniq(arr.map((s) => String(s || '').replace(/[。；;]\s*$/, ''))).join('；');
+  const ct = first.contract || {};
+  const merged = {
+    title: `${clip(core, 6).replace('……', '')}·合流`,
+    genre: uniq(candidates.map((c) => c.genre)).join(' / ') || (p.type === 'short' ? '短篇·综合' : '长篇·综合'),
+    logline: first.logline || `围绕「${core}」，几条看似无关的线最终拧成同一个答案。`,
+    sellingPoints: uniq(candidates.flatMap((c) => c.sellingPoints || [])).slice(0, 5),
+    protagonist: first.protagonist || '核心欲望清晰、代价明确的普通人，被一步步逼到必须做出选择的位置。',
+    style: joined(candidates.map((c) => c.style)) || '克制白描，短句推进，情绪藏在动作里。',
+    audience: first.audience || '偏好强情节与人物弧光的读者',
+    contract: {
+      pov: ct.pov || '第三人称限知视角（跟随主角）',
+      tone: joined(candidates.map((c) => c.contract?.tone)) || '克制、暗流涌动',
+      taboos: uniq(candidates.flatMap((c) => c.contract?.taboos || [])).slice(0, 4),
+      arc: ct.arc || `围绕「${core}」完成一次从逃避到承担的完整弧线。`,
+    },
+  };
+  if (note) merged.sellingPoints.unshift(`融合取向：${clip(note, 24)}`);
+  return JSON.stringify(merged, null, 2);
+}
+
 /* ---------- 世界设定 ---------- */
 export function world(p) {
   const core = coreOf(p);

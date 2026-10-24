@@ -11,7 +11,7 @@ import { createHash } from 'node:crypto';
 import { all, get, run, now } from './db.js';
 import { callAI } from './ai.js';
 import { parseJSONLoose, clip } from './util.js';
-import * as P from './prompts.js';
+import { buildFlavorPrompt } from './skills/deai.js';
 import * as M from './mock.js';
 
 const SETTINGS_KEY = 'flavor';
@@ -27,7 +27,14 @@ export const DEFAULT_FLAVOR_SETTINGS = {
   blockThreshold: 70,
   avoidMinHits: 2,
   avoidLimit: 8,
+  skillHumanizer: true,
+  skillDeai: true,
 };
+
+/** 技能开关 → 提示词组装参数（默认全开） */
+export function skillFlags(cfg = {}) {
+  return { humanizer: cfg.skillHumanizer !== false, deai: cfg.skillDeai !== false };
+}
 
 /** 默认词表：[词, 原因, 建议, 严重度, 分类] */
 const DEFAULT_WORDS = [
@@ -241,6 +248,8 @@ export function getFlavorConfig() {
     blockThreshold: Number.isFinite(Number(saved?.blockThreshold)) ? clampThreshold(saved.blockThreshold) : DEFAULT_FLAVOR_SETTINGS.blockThreshold,
     avoidMinHits: clampInt(saved?.avoidMinHits, 1, 20, DEFAULT_FLAVOR_SETTINGS.avoidMinHits),
     avoidLimit: clampInt(saved?.avoidLimit, 1, 25, DEFAULT_FLAVOR_SETTINGS.avoidLimit),
+    skillHumanizer: saved?.skillHumanizer !== false,
+    skillDeai: saved?.skillDeai !== false,
   };
   const savedRules = Array.isArray(saved?.rules) ? saved.rules : [];
   const byPhrase = new Map(savedRules.map((r) => [String(r?.phrase || ''), r]));
@@ -267,6 +276,8 @@ export function saveFlavorConfig(input = {}) {
     blockThreshold: input.blockThreshold === undefined ? prev.blockThreshold : clampThreshold(input.blockThreshold),
     avoidMinHits: input.avoidMinHits === undefined ? prev.avoidMinHits : clampInt(input.avoidMinHits, 1, 20, prev.avoidMinHits),
     avoidLimit: input.avoidLimit === undefined ? prev.avoidLimit : clampInt(input.avoidLimit, 1, 25, prev.avoidLimit),
+    skillHumanizer: input.skillHumanizer === undefined ? prev.skillHumanizer : !!input.skillHumanizer,
+    skillDeai: input.skillDeai === undefined ? prev.skillDeai : !!input.skillDeai,
     rules: Array.isArray(input.rules)
       ? input.rules
         .filter((r) => r && String(r.phrase || '').trim())
@@ -644,7 +655,7 @@ async function scanByModel(text, ctx = {}) {
     excerpt: h.excerpt || '',
     hits: h.count || 0,
   }));
-  const { system, user } = P.flavorDetect(text, catalog.text, signals);
+  const { system, user } = buildFlavorPrompt('detect', { text, catalogText: catalog.text, signals, skills: skillFlags(ctx.cfg) });
   try {
     const out = await callAI({
       task: 'reviewer', step: 'flavor_detect', system, user,
@@ -681,6 +692,8 @@ async function scanByModel(text, ctx = {}) {
       violations,
       dropped,
       ruleCount: allowed.length,
+      skill: prompt.skill,
+      degraded: prompt.degraded,
     };
   } catch {
     return null;
@@ -742,6 +755,7 @@ export async function scanFlavor(text, ctx = {}) {
   if (cfg.modelEnabled && source.trim()) {
     semantic = await scanByModel(source, {
       ...ctx,
+      cfg,
       statHits: stat.hits,
       textMap: buildTextMap(source),
     });
@@ -771,6 +785,8 @@ export async function scanFlavor(text, ctx = {}) {
     semantic: semantic || { enabled: false, riskScore: null, summary: '', violations: [], dropped: 0 },
     modelScore: riskScore,
     modelNote: semantic?.summary || '',
+    skill: semantic?.skill || null,
+    degraded: semantic ? !!semantic.degraded : null,
     thresholds: { warn: cfg.warnThreshold, block: cfg.blockThreshold },
     stats: {
       words: source.replace(/\s/g, '').length,

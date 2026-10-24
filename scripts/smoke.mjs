@@ -8,6 +8,8 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { runSkill, registerSkill } from '../server/src/skills/registry.js';
+import { buildFlavorPrompt } from '../server/src/skills/deai.js';
 
 const PORT = 3123;
 const BASE = `http://127.0.0.1:${PORT}/api`;
@@ -35,6 +37,19 @@ async function api(method, url, body) {
   try { json = JSON.parse(text); } catch { /* 非 JSON */ }
   if (!res.ok) throw new Error(`${method} ${url} -> HTTP ${res.status}: ${text.slice(0, 200)}`);
   return json;
+}
+
+/** 预期失败的请求：返回状态码与响应体，不抛错 */
+async function apiFail(method, url, body) {
+  const res = await fetch(BASE + url, {
+    method,
+    headers: { 'Content-Type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const text = await res.text();
+  let json = null;
+  try { json = JSON.parse(text); } catch { /* 非 JSON */ }
+  return { status: res.status, json };
 }
 
 /** 读取 SSE 流（POST） */
@@ -108,6 +123,18 @@ async function main() {
   const cUpd = await api('PUT', `/projects/${p.id}/characters/${cAdd.id}`, { status: '在东市闲逛' });
   ok('角色编辑', cUpd.status === '在东市闲逛');
 
+  const relOk = await api('POST', `/projects/${p.id}/relations`, { from: '测试路人', to: c.characters[0].name, type: '旧识', description: '冒烟测试' });
+  ok('手动新增关系（双方角色名）', relOk.from_name === '测试路人' && relOk.to_name === c.characters[0].name, `${relOk.from_name} → ${relOk.to_name}`);
+  const relLegacy = await api('POST', `/projects/${p.id}/relations`, { from_name: c.characters[0].name, to_name: c.characters[1].name });
+  ok('关系接口兼容 from_name/to_name', relLegacy.from_name === c.characters[0].name && relLegacy.type === '关系');
+  const specialName = '阿“七”·<风>&\'';
+  const relSpecial = await api('POST', `/projects/${p.id}/relations`, { from: specialName, to: '测试路人', type: '旧识〈特殊〉', description: '引号 & 尖括号' });
+  ok('特殊字符角色名可保存', relSpecial.from_name === specialName && relSpecial.type === '旧识〈特殊〉');
+  const relMissTo = await apiFail('POST', `/projects/${p.id}/relations`, { from: '测试路人' });
+  ok('缺少角色 B 正确报错', relMissTo.status === 400 && relMissTo.json?.error === '关系需要双方角色名');
+  const relBlank = await apiFail('POST', `/projects/${p.id}/relations`, { from: '   ', to: '测试路人' });
+  ok('空白角色名正确报错', relBlank.status === 400 && relBlank.json?.error === '关系需要双方角色名');
+
   console.log('▶ 架构规划');
   const o = await api('POST', `/projects/${p.id}/outline`, {});
   ok('AI 生成卷纲', o.volumes.length === 3, o.volumes.map((v) => v.title).join(' / '));
@@ -115,6 +142,50 @@ async function main() {
   ok('AI 拆章', cp.chapters.length === 8 && cp.chapters.every((ch) => ch.brief && ch.hook), `共 ${cp.chapters.length} 章`);
   const ch1 = cp.chapters[0];
   ok('出场人物绑定角色库', ch1.cast.every((n) => c.characters.some((x) => x.name === n)), `cast: ${ch1.cast.join('、')}`);
+
+  const manual = await api('POST', `/projects/${p.id}/chapters`, { volumeId: null, title: '手动分卷外章节', brief: '手动创建，用于验证未分卷展示' });
+  ok('手动加章带默认状态与排序', manual.status === 'planned' && manual.volume_id === null && manual.idx > 0, `idx ${manual.idx} · ${manual.status}`);
+  const manualDraft = await api('PUT', `/projects/${p.id}/chapters/${manual.id}`, { status: 'draft' });
+  ok('手动章节状态可切换', manualDraft.status === 'draft');
+  const manualNamed = await api('PUT', `/projects/${p.id}/chapters/${manual.id}`, { title: '标题含“引号”与<符号>' });
+  ok('手动章节标题支持特殊字符', manualNamed.title === '标题含“引号”与<符号>');
+  const pManual = await api('GET', `/projects/${p.id}`);
+  const orphan = pManual.chapters.find((c) => c.id === manual.id);
+  ok('未分卷手动章节仍随作品返回', !!orphan && orphan.volume_id === null && orphan.status === 'draft');
+
+  const doneCh = await api('PUT', `/projects/${p.id}/chapters/${manual.id}`, { status: 'done' });
+  ok('章节状态可手动标记为完成', doneCh.status === 'done');
+  const badStatus = await apiFail('PUT', `/projects/${p.id}/chapters/${manual.id}`, { status: 'finished' });
+  ok('非法章节状态被拒绝', badStatus.status === 400 && badStatus.json?.error === '章节状态不合法');
+
+  const nv = await api('POST', `/projects/${p.id}/volumes`, { title: '第四卷·测试新增卷', summary: '手动新增卷的简介' });
+  ok('新增卷成功且顺序递增', nv.ok === true && nv.idx === 4 && nv.title === '第四卷·测试新增卷', `第${nv.idx}卷`);
+  const nvGet = await api('GET', `/projects/${p.id}/volumes/${nv.id}`);
+  ok('按 ID 查询卷回显完整信息', nvGet.id === nv.id && nvGet.chapterCount === 0 && Array.isArray(nvGet.chapters));
+  const nvDup = await apiFail('POST', `/projects/${p.id}/volumes`, { title: '第四卷·测试新增卷' });
+  ok('新增卷重名校验', nvDup.status === 400 && nvDup.json?.error === '已存在同名卷，请换一个卷名');
+  const nvBlank = await apiFail('POST', `/projects/${p.id}/volumes`, { title: '   ' });
+  ok('新增卷卷名必填', nvBlank.status === 400 && nvBlank.json?.error === '卷名不能为空');
+  const nvLong = await apiFail('POST', `/projects/${p.id}/volumes`, { title: '长'.repeat(81) });
+  ok('新增卷卷名长度校验', nvLong.status === 400 && /80/.test(nvLong.json?.error || ''));
+  const nvPut = await api('PUT', `/projects/${p.id}/volumes/${nv.id}`, { title: '第四卷·改名后', summary: '更新后的简介' });
+  ok('编辑卷保存修改', nvPut.ok === true && nvPut.title === '第四卷·改名后' && nvPut.summary === '更新后的简介');
+  const nvGet2 = await api('GET', `/projects/${p.id}/volumes/${nv.id}`);
+  ok('编辑结果已持久化', nvGet2.title === '第四卷·改名后' && nvGet2.idx === 4);
+  const nvMissing = await apiFail('GET', `/projects/${p.id}/volumes/999999`);
+  ok('不存在的卷返回清晰错误', nvMissing.status === 404 && nvMissing.json?.error === '卷不存在');
+  const nvNoProj = await apiFail('GET', `/projects/999999/volumes/${nv.id}`);
+  ok('无权限/作品不存在时拦截', nvNoProj.status === 404 && nvNoProj.json?.error === '作品不存在');
+
+  const cp2 = await api('POST', `/projects/${p.id}/volumes/${o.volumes[1].id}/plan`, {});
+  const v2Chapters = cp2.chapters.filter((c) => c.volume_id === o.volumes[1].id);
+  ok('第二卷拆章正常落库', v2Chapters.length === 8 && v2Chapters.every((c) => c.title && c.brief && c.hook), `第二卷 ${v2Chapters.length} 章`);
+  const cp2b = await api('POST', `/projects/${p.id}/volumes/${o.volumes[1].id}/plan`, {});
+  ok('重复拆章替换旧规划而不叠加', cp2b.chapters.filter((c) => c.volume_id === o.volumes[1].id).length === 8 && cp2b.replaced === 8,
+    `替换 ${cp2b.replaced} 章 · 新生成 ${cp2b.planned} 章`);
+  const cp3 = await api('POST', `/projects/${p.id}/volumes/${o.volumes[2].id}/plan`, {});
+  const v3Chapters = cp3.chapters.filter((c) => c.volume_id === o.volumes[2].id);
+  ok('其他卷拆章功能一致', v3Chapters.length === 8 && v3Chapters.every((c) => c.title && c.brief), `第三卷 ${v3Chapters.length} 章`);
 
   console.log('▶ 写作（SSE 流式）');
   const events = await sse(`/projects/${p.id}/chapters/${ch1.id}/write`, {});
@@ -305,6 +376,55 @@ async function main() {
   const sEvents = await sse(`/projects/${sp.id}/chapters/${sch1.id}/write`, {});
   const sDone = sEvents.find((e) => e.ev === 'done');
   ok('短篇正文（字数按目标分摊）', !!sDone && sDone.data.wordCount > 500, `${sDone.data.wordCount} 字（目标 6000/8 章）`);
+
+  const saveShort = await api('PUT', `/projects/${sp.id}/chapters/${sch1.id}/content?reason=manual`, { content: sDone.data.text });
+  ok('短篇正文入库', saveShort.ok === true && saveShort.wordCount > 500);
+
+  const sReplan = await api('POST', `/projects/${sp.id}/volumes/${so.volumes[0].id}/plan`, {});
+  const sKeep = await api('GET', `/projects/${sp.id}/chapters/${sch1.id}`);
+  const sVol1Count = (await api('GET', `/projects/${sp.id}`)).chapters.filter((c) => c.volume_id === so.volumes[0].id).length;
+  ok('重新拆章保留正文并替换旧规划',
+    sReplan.writtenChapters === 1 && sReplan.replaced === 1 && sReplan.planned === 1
+      && sKeep.content === sDone.data.text && sVol1Count === 2,
+    `保留 ${sReplan.writtenChapters} 章正文 · 替换 ${sReplan.replaced} 章规划 · 新生成 ${sReplan.planned} 章`);
+
+  const sBefore = await api('GET', `/projects/${sp.id}`);
+  const outlineNoMode = await apiFail('POST', `/projects/${sp.id}/outline`, {});
+  ok('已有正文时卷纲需显式选择',
+    outlineNoMode.status === 409 && outlineNoMode.json?.code === 'HAS_WRITTEN_CHAPTERS' && outlineNoMode.json.stats.written >= 1,
+    outlineNoMode.json?.error);
+  const skipRes = await api('POST', `/projects/${sp.id}/outline`, { mode: 'skip' });
+  const sAfterSkip = await api('GET', `/projects/${sp.id}`);
+  const sWritten = await api('GET', `/projects/${sp.id}/chapters/${sch1.id}`);
+  const snapChapters = (p) => p.chapters.map((c) => `${c.id}:${c.idx}:${c.volume_id}:${c.title}:${c.status}:${c.word_count}`).join('|');
+  const snapVolumes = (p) => p.volumes.map((v) => `${v.id}:${v.idx}:${v.title}:${v.summary}`).join('|');
+  ok('跳过模式完整保留章节与卷纲',
+    snapChapters(sAfterSkip) === snapChapters(sBefore) && snapVolumes(sAfterSkip) === snapVolumes(sBefore)
+      && sWritten.content === sDone.data.text && sWritten.word_count === sDone.data.wordCount,
+    `保留 ${skipRes.preservedChapters} 章 · 追加 ${skipRes.addedVolumes} 卷`);
+  const overwriteRes = await api('POST', `/projects/${sp.id}/outline`, { mode: 'overwrite' });
+  const sAfterOver = await api('GET', `/projects/${sp.id}`);
+  ok('覆盖模式清空旧章节并重建卷纲',
+    overwriteRes.deletedChapters === sBefore.chapters.length && sAfterOver.chapters.length === 0 && sAfterOver.volumes.length === 4,
+    `删除 ${overwriteRes.deletedChapters} 章 · 新建 ${sAfterOver.volumes.length} 卷`);
+
+  console.log('▶ 去AI味 skills');
+  const skillList = await api('GET', '/flavor/skills');
+  const deai = skillList.skills?.find((s) => s.id === 'deai-humanizer');
+  ok('去AI味 skill 已注册', !!deai && ['detect', 'rewrite', 'repair'].every((c) => deai.capabilities.includes(c)) && deai.source?.length === 2);
+  const skillPrompt = buildFlavorPrompt('rewrite', { selection: '他缓缓抬起头。' });
+  ok('提示词载入两个仓库的原文规则',
+    skillPrompt.skill === 'deai-humanizer'
+      && skillPrompt.system.includes('中文去 AI 味')
+      && skillPrompt.system.includes('人类区间提醒'));
+  const fScan = await api('POST', `/projects/${p.id}/chapters/${ch1.id}/flavor-scan`, {});
+  ok('扫描返回风险等级与分数', typeof fScan.score === 'number' && !!fScan.level, `${fScan.level} · ${fScan.score}`);
+  const fw = await sse(`/projects/${p.id}/chapters/${ch1.id}/flavor-rewrite`, { selection: '他缓缓抬起头，仿佛明白了什么。', hits: [] });
+  const fwDone = fw.find((e) => e.ev === 'done');
+  ok('改写结果标记由 skill 处理', fwDone?.data?.skill === 'deai-humanizer' && fwDone?.data?.degraded === false);
+  registerSkill({ id: 'test-broken', capabilities: ['rewrite'], rewrite() { throw new Error('故意失败'); } });
+  const degraded = runSkill('test-broken', 'rewrite', {}, () => ({ system: 'fallback-system', user: 'fallback-user' }));
+  ok('skill 异常时自动降级', degraded.skill === 'builtin' && degraded.degraded === true && degraded.system === 'fallback-system');
 
   console.log('▶ 示例作品');
   const demo = await api('POST', '/demo', {});

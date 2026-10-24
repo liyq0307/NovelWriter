@@ -50,6 +50,25 @@ interface SimLink extends SimulationLinkDatum<SimNode> {
 
 const ROLE_R: Record<string, number> = { 主角: 34, 反派: 30, 重要配角: 28, 配角: 26 };
 
+/** 节点可视范围：留出圆盘与下方姓名标签的余量，避免贴边被裁掉 */
+const nodeBounds = (r: number) => ({
+  x0: r + 18, x1: VB_W - r - 18,
+  y0: r + 26, y1: VB_H - r - 34,
+});
+
+/** 无关系时的稳定环形布局：不跑力导向，避免节点互相排斥飘出画布 */
+function layoutRing(nodes: SimNode[]) {
+  const n = nodes.length;
+  const ring = n <= 1 ? 0 : Math.min(215, Math.max(120, n * 34));
+  nodes.forEach((nd, i) => {
+    const ang = (i / n) * Math.PI * 2 - Math.PI / 2;
+    nd.x = VB_W / 2 + Math.cos(ang) * ring;
+    nd.y = VB_H / 2 - 6 + Math.sin(ang) * ring * 0.76;
+    nd.fx = null;
+    nd.fy = null;
+  });
+}
+
 function RelGraph({ characters, relations }: { characters: Character[]; relations: Relation[] }) {
   const [hover, setHover] = useState<number | null>(null);
   const [hoverEdge, setHoverEdge] = useState<number | null>(null);
@@ -73,13 +92,16 @@ function RelGraph({ characters, relations }: { characters: Character[]; relation
   /* 力导向布局：位置跨渲染保留，拖拽时固定节点（fx/fy），数据变化时重建仿真 */
   useEffect(() => {
     const prev = new Map(nodesRef.current.map((n) => [n.id, n]));
+    const initRing = Math.min(190, 120 + characters.length * 10);
     const nodes: SimNode[] = characters.map((c, i) => {
       const old = prev.get(c.id);
       const ang = (i / Math.max(characters.length, 1)) * Math.PI * 2 - Math.PI / 2;
+      const r = ROLE_R[c.role] ?? 26;
+      const b = nodeBounds(r);
       return {
-        id: c.id, name: c.name, role: c.role, r: ROLE_R[c.role] ?? 26,
-        x: old?.x ?? VB_W / 2 + 200 * Math.cos(ang),
-        y: old?.y ?? VB_H / 2 + 160 * Math.sin(ang),
+        id: c.id, name: c.name, role: c.role, r,
+        x: clamp(old?.x ?? VB_W / 2 + initRing * Math.cos(ang), b.x0, b.x1),
+        y: clamp(old?.y ?? VB_H / 2 + initRing * 0.8 * Math.sin(ang), b.y0, b.y1),
       };
     });
     const pairSeen = new Map<string, number>();
@@ -96,6 +118,14 @@ function RelGraph({ characters, relations }: { characters: Character[]; relation
     nodesRef.current = nodes;
     linksRef.current = links;
 
+    /* 还没有任何关系时用静态环形布局，避免斥力把节点推散到画布外 */
+    if (!links.length) {
+      simRef.current?.stop();
+      simRef.current = null;
+      layoutRing(nodes);
+      return;
+    }
+
     const sim = forceSimulation<SimNode>(nodes)
       .force('link', forceLink<SimNode, SimLink>(links)
         .id((d) => d.id)
@@ -105,7 +135,15 @@ function RelGraph({ characters, relations }: { characters: Character[]; relation
       .force('collide', forceCollide<SimNode>().radius((d) => d.r + 20).iterations(2))
       .force('center', forceCenter(VB_W / 2, VB_H / 2 - 10))
       .alphaMin(0.02)
-      .on('tick', () => setTick((t) => t + 1));
+      .on('tick', () => {
+        /* 每帧把节点约束在可视区内，防止越界后看不见 */
+        for (const n of nodes) {
+          const b = nodeBounds(n.r);
+          n.x = clamp(n.x ?? VB_W / 2, b.x0, b.x1);
+          n.y = clamp(n.y ?? VB_H / 2, b.y0, b.y1);
+        }
+        setTick((t) => t + 1);
+      });
     simRef.current = sim;
     return () => { sim.stop(); simRef.current = null; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -155,8 +193,11 @@ function RelGraph({ characters, relations }: { characters: Character[]; relation
     const d = drag.current;
     const n = nodesRef.current.find((m) => m.id === d.id);
     if (!n) return;
-    n.fx = clamp(x + d.dx, n.r + 18, VB_W - n.r - 18);
-    n.fy = clamp(y + d.dy, n.r + 18, VB_H - n.r - 18);
+    const b = nodeBounds(n.r);
+    const nx = clamp(x + d.dx, b.x0, b.x1);
+    const ny = clamp(y + d.dy, b.y0, b.y1);
+    if (simRef.current) { n.fx = nx; n.fy = ny; }
+    else { n.x = nx; n.y = ny; setTick((t) => t + 1); }
   };
   const endDrag = () => {
     if (!drag.current) return;
@@ -166,6 +207,7 @@ function RelGraph({ characters, relations }: { characters: Character[]; relation
     simRef.current?.alphaTarget(0);
   };
   const relayout = () => {
+    if (!simRef.current) { layoutRing(nodesRef.current); setTick((t) => t + 1); return; }
     nodesRef.current.forEach((n) => {
       n.fx = null; n.fy = null;
       const ang = Math.random() * Math.PI * 2;
@@ -173,7 +215,7 @@ function RelGraph({ characters, relations }: { characters: Character[]; relation
       n.x = VB_W / 2 + Math.cos(ang) * rad;
       n.y = VB_H / 2 + Math.sin(ang) * rad;
     });
-    simRef.current?.alpha(1).restart();
+    simRef.current.alpha(1).restart();
   };
 
   return (
@@ -358,11 +400,19 @@ export default function Characters() {
   };
 
   const saveRel = async () => {
-    if (!rel.from_name || !rel.to_name) { setErr('关系需要双方角色名'); return; }
+    const from = (rel.from_name || '').trim();
+    const to = (rel.to_name || '').trim();
+    if (!from || !to) { setErr('关系需要双方角色名'); return; }
     try {
-      await api.post(`/projects/${project.id}/relations`, rel);
+      /* 接口字段为 from / to，表单里用的是 from_name / to_name，这里做一次映射 */
+      await api.post(`/projects/${project.id}/relations`, {
+        from, to,
+        type: (rel.type || '').trim() || '关系',
+        description: rel.description || '',
+      });
       setRelEditing(false);
       setRel({ type: '关系' });
+      setErr(null);
       await reload();
     } catch (e: any) {
       setErr(e.message);

@@ -52,6 +52,11 @@ export default function Directions() {
   const [pointsText, setPointsText] = useState('');
   const [taboosText, setTaboosText] = useState('');
   const [saving, setSaving] = useState(false);
+  const [picked, setPicked] = useState<number[]>([]);
+  const [mergeOpen, setMergeOpen] = useState(false);
+  const [mergeNote, setMergeNote] = useState('');
+  const [merging, setMerging] = useState(false);
+  const [merged, setMerged] = useState<Direction | null>(null);
   const nav = useNavigate();
 
   const d = project.direction;
@@ -77,6 +82,8 @@ export default function Directions() {
     try {
       const arr: Direction[] = await api.post(`/projects/${project.id}/directions`, { guide });
       setCandidates(arr);
+      setPicked([]);
+      setMerged(null);
       if (guideOpen) setGuideOpen(false);
     } catch (e: any) {
       setErr(e.message);
@@ -97,10 +104,38 @@ export default function Directions() {
       await reload();
       setNote(`已选定《${dir.title}》——接下来去「世界手册」搭世界、「角色库」立人物。`);
       setCandidates(null);
+      setPicked([]);
+      setMerged(null);
     } catch (e: any) {
       setErr(e.message);
     } finally {
       setBusy(false);
+    }
+  };
+
+  /** 勾选 / 取消勾选候选方向 */
+  const togglePick = (i: number) => {
+    setPicked((v) => (v.includes(i) ? v.filter((x) => x !== i) : [...v, i]));
+  };
+
+  const mergeSelected = async () => {
+    if (!candidates) return;
+    const chosen = picked.map((i) => candidates[i]).filter(Boolean);
+    if (chosen.length < 2) return;
+    setMerging(true); setErr(null);
+    try {
+      const dir: Direction = await api.post(`/projects/${project.id}/directions/merge`, {
+        candidates: chosen,
+        note: mergeNote.trim(),
+        guide,
+      });
+      setMerged(dir);
+      setMergeOpen(false);
+      setNote('融合完成：保留各方向最有张力的部分，合成一个可执行的新方向。');
+    } catch (e: any) {
+      setErr(e.message);
+    } finally {
+      setMerging(false);
     }
   };
 
@@ -294,10 +329,58 @@ export default function Directions() {
 
       <ErrorNote error={err} onRetry={generate} />
 
+      {merged && (
+        <div className="card dir-card dir-merged" style={{ marginBottom: 20 }}>
+          <div className="row-wrap">
+            <span className="dir-title">《{merged.title}》</span>
+            <Badge tone="accent">{merged.genre}</Badge>
+            <Badge tone="ok">融合结果</Badge>
+          </div>
+          <div className="dir-logline">{merged.logline}</div>
+          <div className="row-wrap">
+            {merged.sellingPoints?.map((s, i) => <span key={i} className="chip">{s}</span>)}
+          </div>
+          <div className="kv mt8">
+            <div><b>主角</b>{merged.protagonist}</div>
+            <div><b>文风</b>{merged.style}</div>
+            <div><b>读者</b>{merged.audience}</div>
+          </div>
+          <div className="row mt8">
+            <button className="btn primary" disabled={busy || merging} onClick={() => choose(merged)}>选定此方向</button>
+            <button className="btn small" disabled={busy || merging} onClick={() => setMergeOpen(true)}>调整要求再融合</button>
+            <button className="btn ghost small" disabled={merging} onClick={() => setMerged(null)}>丢弃</button>
+          </div>
+        </div>
+      )}
+
+      {candidates && (
+        <div className="dir-merge-bar">
+          <span className="small">
+            {picked.length
+              ? `已选 ${picked.length} 个方向${picked.length < 2 ? '，再选一个即可融合' : ''}`
+              : `从 ${candidates.length} 个候选方向中勾选至少 2 个，可融合成一个新方向`}
+          </span>
+          <div className="grow" />
+          <button
+            className="btn primary small"
+            disabled={busy || merging || picked.length < 2}
+            onClick={() => { setErr(null); setMergeOpen(true); }}
+          >
+            融合所选方向
+          </button>
+          <button className="btn ghost small" disabled={busy || merging} onClick={generate}>
+            {busy ? <Spinner text="重新生成中…" /> : '对这批不满意，重新生成'}
+          </button>
+          {picked.length > 0 && (
+            <button className="btn ghost small" disabled={merging} onClick={() => setPicked([])}>清空</button>
+          )}
+        </div>
+      )}
+
       {candidates && (
         <div className="grid grid-3">
           {candidates.map((c, i) => (
-            <div key={i} className="card dir-card">
+            <div key={i} className={`card dir-card ${picked.includes(i) ? 'picked' : ''}`}>
               <div className="row-wrap">
                 <span className="dir-title">{c.title}</span>
                 <Badge tone="accent">{c.genre}</Badge>
@@ -311,12 +394,39 @@ export default function Directions() {
                 <div><b>文风</b>{c.style}</div>
                 <div><b>读者</b>{c.audience}</div>
               </div>
-              <div className="mt8">
-                <button className="btn primary" disabled={busy} onClick={() => choose(c)}>选定此方向</button>
+              <div className="dir-actions mt8">
+                <label className="dir-pick">
+                  <input type="checkbox" checked={picked.includes(i)} disabled={busy || merging} onChange={() => togglePick(i)} />
+                  加入融合
+                </label>
+                <button className="btn primary" disabled={busy || merging} onClick={() => choose(c)}>选定此方向</button>
               </div>
             </div>
           ))}
         </div>
+      )}
+      {mergeOpen && candidates && (
+        <Modal title="融合候选方向" onClose={() => setMergeOpen(false)}>
+          <div className="muted small" style={{ lineHeight: 1.8, marginBottom: 12 }}>
+            将把 {picked.map((i) => `《${candidates[i]?.title}》`).join('、')} 融合成一个新方向：
+            AI 会吸收各方向最有力的冲突、卖点与情绪基调，消除互相矛盾之处，而不是简单拼接字段。
+          </div>
+          <Field label="融合要求" hint="可选，越具体越贴预期">
+            <textarea
+              rows={4}
+              value={mergeNote}
+              placeholder="如：保留悬疑的追查主线，用玄幻的力量体系承载；主角要有一条温暖的师徒线；不要多视角。"
+              onChange={(e) => setMergeNote(e.target.value)}
+            />
+          </Field>
+          {err && <ErrorNote error={err} />}
+          <div className="row" style={{ justifyContent: 'flex-end', marginTop: 18 }}>
+            <button className="btn" disabled={merging} onClick={() => setMergeOpen(false)}>取消</button>
+            <button className="btn primary" disabled={merging} onClick={mergeSelected}>
+              {merging ? <Spinner text="正在融合…" /> : '开始融合'}
+            </button>
+          </div>
+        </Modal>
       )}
       {edit && (
         <Modal title="编辑方向与创作约定" wide onClose={() => setEdit(null)}>

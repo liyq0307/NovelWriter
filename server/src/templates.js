@@ -8,6 +8,7 @@ import { all, get, run, now } from './db.js';
 
 export const PROMPT_STEPS = [
   { step: 'directions', label: '开书方向', desc: '根据灵感生成候选方向' },
+  { step: 'directions_merge', label: '方向融合', desc: '把多个候选方向融合成一个' },
   { step: 'world', label: '世界设定', desc: '起草地理 / 势力 / 规则 / 物品 / 历史' },
   { step: 'characters', label: '角色设计', desc: '设计核心人物与关系网' },
   { step: 'outline', label: '卷纲规划', desc: '规划卷级弧线与高潮' },

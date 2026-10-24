@@ -99,6 +99,28 @@ function* chunkStream(text) {
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/** 可重试的错误：网络抖动、超时、限流与服务端 5xx（鉴权/参数错误不重试） */
+function isRetryableError(e) {
+  const msg = String(e?.message || e || '');
+  if (/fetch failed|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|socket hang up|other side closed|terminated|premature close/i.test(msg)) return true;
+  const m = msg.match(/HTTP (\d{3})/);
+  if (m) {
+    const code = Number(m[1]);
+    return code === 408 || code === 429 || code >= 500;
+  }
+  return false;
+}
+
+/** 把底层网络错误转成用户能看懂的提示（原始信息保留在调用日志里） */
+function friendlyAIError(e) {
+  const msg = String(e?.message || e || '模型调用失败');
+  if (/fetch failed|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|socket hang up|other side closed/i.test(msg)) {
+    return '模型接口连接失败（网络或代理异常），请检查网络后重试';
+  }
+  if (/terminated|aborted|timeout/i.test(msg)) return '模型接口响应超时或被中断，请重试';
+  return msg;
+}
+
 /** OpenAI 兼容流式调用 */
 async function chatCompletion(s, model, call) {
   const url = s.baseUrl.replace(/\/+$/, '') + '/chat/completions';
@@ -127,31 +149,36 @@ async function chatCompletion(s, model, call) {
   let usage = null;
   const dec = new TextDecoder();
   let buf = '';
-  for await (const chunk of res.body) {
-    buf += dec.decode(chunk, { stream: true });
-    let idx;
-    while ((idx = buf.indexOf('\n')) >= 0) {
-      const line = buf.slice(0, idx).trim();
-      buf = buf.slice(idx + 1);
-      if (!line.startsWith('data:')) continue;
-      const data = line.slice(5).trim();
-      if (data === '[DONE]') continue;
-      try {
-        const j = JSON.parse(data);
-        const delta = j.choices?.[0]?.delta?.content;
-        if (delta) {
-          text += delta;
-          call.onDelta?.(delta);
-        }
-        if (j.usage) {
-          usage = {
-            input_tokens: j.usage.prompt_tokens || 0,
-            output_tokens: j.usage.completion_tokens || 0,
-            cached_tokens: j.usage.prompt_tokens_details?.cached_tokens || 0,
-          };
-        }
-      } catch { /* 忽略无法解析的心跳行 */ }
+  try {
+    for await (const chunk of res.body) {
+      buf += dec.decode(chunk, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, idx).trim();
+        buf = buf.slice(idx + 1);
+        if (!line.startsWith('data:')) continue;
+        const data = line.slice(5).trim();
+        if (data === '[DONE]') continue;
+        try {
+          const j = JSON.parse(data);
+          const delta = j.choices?.[0]?.delta?.content;
+          if (delta) {
+            text += delta;
+            call.onDelta?.(delta);
+          }
+          if (j.usage) {
+            usage = {
+              input_tokens: j.usage.prompt_tokens || 0,
+              output_tokens: j.usage.completion_tokens || 0,
+              cached_tokens: j.usage.prompt_tokens_details?.cached_tokens || 0,
+            };
+          }
+        } catch { /* 忽略无法解析的心跳行 */ }
+      }
     }
+  } catch (e) {
+    /* 上游在流式输出中途断开（terminated / 超时）时，保留已收到的内容，交给上层做截断容错解析 */
+    if (text.trim().length < 40) throw e;
   }
   if (!usage) {
     usage = {
@@ -193,31 +220,36 @@ async function anthropicCompletion(s, model, call) {
   let usageRaw = null;
   const dec = new TextDecoder();
   let buf = '';
-  for await (const chunk of res.body) {
-    buf += dec.decode(chunk, { stream: true });
-    let idx;
-    while ((idx = buf.indexOf('\n')) >= 0) {
-      const line = buf.slice(0, idx).trim();
-      buf = buf.slice(idx + 1);
-      if (!line.startsWith('data:')) continue;
-      const data = line.slice(5).trim();
-      if (!data) continue;
-      let j;
-      try { j = JSON.parse(data); } catch { continue; }
-      if (j.type === 'content_block_delta') {
-        const delta = j.delta;
-        if (delta?.type === 'text_delta' && delta.text) {
-          text += delta.text;
-          call.onDelta?.(delta.text);
+  try {
+    for await (const chunk of res.body) {
+      buf += dec.decode(chunk, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, idx).trim();
+        buf = buf.slice(idx + 1);
+        if (!line.startsWith('data:')) continue;
+        const data = line.slice(5).trim();
+        if (!data) continue;
+        let j;
+        try { j = JSON.parse(data); } catch { continue; }
+        if (j.type === 'content_block_delta') {
+          const delta = j.delta;
+          if (delta?.type === 'text_delta' && delta.text) {
+            text += delta.text;
+            call.onDelta?.(delta.text);
+          }
+        } else if (j.type === 'message_start' && j.message?.usage) {
+          usageRaw = { ...j.message.usage };
+        } else if (j.type === 'message_delta' && j.usage) {
+          usageRaw = { ...(usageRaw || {}), ...j.usage };
+        } else if (j.type === 'error') {
+          throw new Error(`模型接口错误：${j.error?.message || '流式返回异常'}`);
         }
-      } else if (j.type === 'message_start' && j.message?.usage) {
-        usageRaw = { ...j.message.usage };
-      } else if (j.type === 'message_delta' && j.usage) {
-        usageRaw = { ...(usageRaw || {}), ...j.usage };
-      } else if (j.type === 'error') {
-        throw new Error(`模型接口错误：${j.error?.message || '流式返回异常'}`);
       }
     }
+  } catch (e) {
+    /* 与 OpenAI 分支一致：流式中断时保留已有内容，避免整次调用作废 */
+    if (text.trim().length < 40) throw e;
   }
   let usage;
   if (usageRaw && (usageRaw.input_tokens != null || usageRaw.output_tokens != null)) {
@@ -275,17 +307,31 @@ export async function callAI(call) {
         estimated: true,
       };
     } else {
-      const out = s.provider === 'anthropic'
-        ? await anthropicCompletion(s, model, call)
-        : await chatCompletion(s, model, call);
-      text = out.text;
-      usage = out.usage;
+      /* 网络抖动 / 限流 / 服务端 5xx 自动重试；已开始流式输出或用户取消时不重试，避免重复内容 */
+      const ATTEMPTS = 3;
+      for (let attempt = 1; ; attempt++) {
+        let gotDelta = false;
+        const wrapped = call.onDelta
+          ? { ...call, onDelta: (d) => { gotDelta = true; call.onDelta(d); } }
+          : call;
+        try {
+          const out = s.provider === 'anthropic'
+            ? await anthropicCompletion(s, model, wrapped)
+            : await chatCompletion(s, model, wrapped);
+          text = out.text;
+          usage = out.usage;
+          break;
+        } catch (e) {
+          if (attempt >= ATTEMPTS || gotDelta || call.signal?.aborted || !isRetryableError(e)) throw e;
+          await sleep(1200 * attempt + Math.floor(Math.random() * 500));
+        }
+      }
     }
     logCall({ ...call, model: mock ? 'mock-1' : model, text, usage, status: 'ok', durationMs: Date.now() - t0 });
     return { text, usage, model: mock ? 'mock-1' : model };
   } catch (e) {
     logCall({ ...call, model: mock ? 'mock-1' : model, text: '', usage: null, status: 'error', error: e?.message || String(e), durationMs: Date.now() - t0 });
-    throw e;
+    throw new Error(friendlyAIError(e));
   }
 }
 

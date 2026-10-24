@@ -5,9 +5,10 @@
 import { Router } from 'express';
 import { get } from '../db.js';
 import { callAI } from '../ai.js';
-import * as P from '../prompts.js';
 import * as M from '../mock.js';
 import { sseFrame, parseJSONLoose } from '../util.js';
+import { buildFlavorPrompt, cleanRewrite } from '../skills/deai.js';
+import { listSkills } from '../skills/registry.js';
 import {
   DEFAULT_FLAVOR_SETTINGS,
   SEMANTIC_RULES,
@@ -22,6 +23,7 @@ import {
   clearAvoidList,
   buildLexiconText,
   scanWordHits,
+  skillFlags,
 } from '../flavor.js';
 
 const r = Router();
@@ -42,6 +44,10 @@ r.get('/flavor/settings', (req, res) => {
 
 r.put('/flavor/settings', (req, res) => {
   res.json(saveFlavorConfig(req.body || {}));
+});
+
+r.get('/flavor/skills', (req, res) => {
+  res.json({ skills: listSkills() });
 });
 
 r.post('/flavor/rules/reset', (req, res) => {
@@ -122,14 +128,6 @@ r.post('/projects/:id/flavor-avoid/reset', (req, res) => {
 
 /* ============ 按命中项改写（SSE） ============ */
 
-/** 去掉模型偶然带出的「改写后的片段：」等元信息，避免写回正文时反复出现前缀 */
-function cleanRewriteText(raw) {
-  let text = String(raw || '').trim();
-  text = text.replace(/^【(?:改写|润色|修改|演示|结果|输出)[^】]*】[^\n]*\n+/, '').trim();
-  text = text.replace(/^(?:改写|润色|修改|结果|输出)[^\n]{0,20}[:：]\s*\n?/, '').trim();
-  return text;
-}
-
 r.post('/projects/:id/chapters/:cid/flavor-rewrite', async (req, res) => {
   const p = proj(req.params.id);
   if (!p) return res.status(404).json({ error: '作品不存在' });
@@ -141,7 +139,8 @@ r.post('/projects/:id/chapters/:cid/flavor-rewrite', async (req, res) => {
   const cfg = getFlavorConfig();
   const avoid = buildAvoidList(p.id, cfg.avoidMinHits, cfg.avoidLimit);
   const { lexiconText, avoidText } = buildLexiconText(cfg, avoid);
-  const { system, user } = P.flavorRewrite(selection, hits, before, after, lexiconText, avoidText);
+  const prompt = buildFlavorPrompt('rewrite', { selection, hits, before, after, lexiconText, avoidText, skills: skillFlags(cfg) });
+  const { system, user } = prompt;
   const beforeHits = cfg.wordEnabled ? scanWordHits(String(selection), cfg.rules) : [];
 
   res.writeHead(200, {
@@ -163,7 +162,7 @@ r.post('/projects/:id/chapters/:cid/flavor-rewrite', async (req, res) => {
       onDelta: (d) => send('delta', { text: d }),
       mock: () => M.rewriteText(selection, '去掉AI腔，保持原意'),
     });
-    const cleaned = cleanRewriteText(out.text) || String(out.text || '').trim();
+    const cleaned = cleanRewrite(out.text) || String(out.text || '').trim();
     if (!cleaned) throw new Error('改写模型没有返回正文');
     const afterHits = cfg.wordEnabled ? scanWordHits(cleaned, cfg.rules) : [];
     const beforeKeys = new Set(beforeHits.map((h) => h.rulePhrase || h.phrase));
@@ -175,6 +174,8 @@ r.post('/projects/:id/chapters/:cid/flavor-rewrite', async (req, res) => {
       usage: out.usage,
       model: out.model,
       flavor: { before: beforeHits.length, after: afterHits.length, newHits },
+      skill: prompt.skill,
+      degraded: prompt.degraded,
     });
   } catch (e) {
     send('error', { message: e?.message || '改写失败' });
@@ -304,7 +305,8 @@ r.post('/projects/:id/chapters/:cid/flavor-repair', async (req, res) => {
     const cfg = getFlavorConfig();
     const avoid = buildAvoidList(p.id, cfg.avoidMinHits, cfg.avoidLimit);
     const { lexiconText, avoidText } = buildLexiconText(cfg, avoid);
-    const { system, user } = P.flavorRepair(text, valid, lexiconText, avoidText);
+    const prompt = buildFlavorPrompt('repair', { text, issues: valid, lexiconText, avoidText, skills: skillFlags(cfg) });
+    const { system, user } = prompt;
     const out = await callAI({
       task: 'writer', step: 'flavor_repair', system, user,
       projectId: p.id, chapterId: c.id,
@@ -340,6 +342,8 @@ r.post('/projects/:id/chapters/:cid/flavor-repair', async (req, res) => {
         inDialogue: !!h.inDialogue,
       })),
       model: out.model,
+      skill: prompt.skill,
+      degraded: prompt.degraded,
     });
   } catch (e) {
     res.status(502).json({ error: e?.message || '修复失败' });

@@ -28,8 +28,9 @@ const worldDigest = (entries) => (entries || []).map((w) => `- ${w.name}：${cli
 const charDigest = (chars) => (chars || []).map((c) => `- ${c.name}（${c.role}）：${clip(c.profile, 60)}｜目标：${clip(c.goals, 50)}`).join('\n');
 
 /* ============ 1. 开书方向 ============ */
-export function directions(p, guide = {}) {
-  const system = '你是资深小说策划编辑，擅长把一句模糊的灵感打磨成可执行的创作方向。只输出 JSON，不要任何解释或多余文字。';
+
+/** 构思向导偏好 → 提示词条目（方向生成与方向融合共用） */
+const guideLines = (guide = {}) => {
   const lines = [];
   if (guide.genre) lines.push(`题材赛道：${guide.genre}`);
   if (guide.setting) lines.push(`世界观偏好：${guide.setting}`);
@@ -42,9 +43,15 @@ export function directions(p, guide = {}) {
   if (Array.isArray(guide.sellingPoints) && guide.sellingPoints.length) lines.push(`核心爽点：${guide.sellingPoints.join('、')}`);
   if (guide.mustHave) lines.push(`必须包含：${guide.mustHave}`);
   if (guide.taboos) lines.push(`明确禁忌：${guide.taboos}`);
-  const guideBlock = lines.length
-    ? `\n【作者补充的创作偏好（必须体现）】\n${lines.join('\n')}\n`
-    : '';
+  return lines;
+};
+
+const guideBlockOf = (lines) =>
+  lines.length ? `\n【作者补充的创作偏好（必须体现）】\n${lines.join('\n')}\n` : '';
+
+export function directions(p, guide = {}) {
+  const system = '你是资深小说策划编辑，擅长把一句模糊的灵感打磨成可执行的创作方向。只输出 JSON，不要任何解释或多余文字。';
+  const guideBlock = guideBlockOf(guideLines(guide));
   const user = `作者的一句灵感：
 """
 ${p.premise}
@@ -55,8 +62,44 @@ ${guideBlock}
 作者给出的偏好是硬约束：题材、世界观、主角类型、视角、基调、禁忌必须在候选方向中体现；若与灵感冲突，优先保证灵感的核心冲突成立，再尽量贴合偏好。
 每个方向的 contract 必须写实可执行（pov 要具体到人称与视角范围，taboos 要能直接约束正文），不要写空话。
 
+输出保持精炼：每个方向各字段合计控制在 300 字以内，三个方向总输出不超过 900 字，避免冗长导致输出被截断。
 严格输出 JSON 数组：顶层必须是以 [ 开头、] 结尾的数组，包含 3 个元素；不要返回单个对象，不要用 Markdown 代码块包裹。每个元素字段如下：
 {"title":"暂定书名","genre":"题材标签","logline":"一句话故事（60字内）","sellingPoints":["卖点","卖点","卖点"],"protagonist":"主角设定（核心欲望与阻力）","style":"文风与叙事基调","audience":"目标读者","contract":{"pov":"叙事视角","tone":"语言基调","taboos":["要避免的写法"],"arc":"整体故事弧线"}}`;
+  return { system, user };
+}
+
+/** 把多个候选方向融合成一个主线自洽的方向 */
+export function directionsMerge(p, candidates = [], note = '', guide = {}) {
+  const system = '你是资深小说策划编辑，擅长把几个各有所长的候选方向融合成一个主线自洽、更可执行的创作方向。只输出 JSON，不要任何解释或多余文字。';
+  const block = (candidates || []).map((c, i) => {
+    const ct = c.contract || {};
+    return `【候选 ${i + 1}】${c.title || ''}（${c.genre || '未定题材'}）
+一句话故事：${c.logline || ''}
+卖点：${(c.sellingPoints || []).join('、') || '无'}
+主角：${c.protagonist || ''}
+文风：${c.style || ''}
+读者：${c.audience || ''}
+创作约定：视角=${ct.pov || '未定'}；基调=${ct.tone || '未定'}；弧线=${ct.arc || '未定'}；避免=${(ct.taboos || []).join('、') || '无'}`;
+  }).join('\n\n');
+  const guideBlock = guideBlockOf(guideLines(guide));
+  const askBlock = note ? `\n【作者的融合要求（优先满足）】\n${note}\n` : '';
+  const user = `作者的一句灵感：
+"""
+${p.premise}
+"""
+作品形态：${p.type === 'short' ? '短篇（一次读完、有完整结局）' : '长篇连载（可持续推进几十万字）'}${p.target_words ? `，目标约 ${p.target_words} 字` : ''}
+
+【待融合的候选方向】
+${block}
+${guideBlock}${askBlock}
+请把这几个候选方向融合成**一个**新方向：
+- 只保留一条主线冲突，不能是多个故事的拼盘；设定、人物欲望与情绪基调必须彼此自洽。
+- 吸收各候选最有力的部分：最有张力的冲突、最好卖的爽点、最合适的叙事视角，并消除互相矛盾之处。
+- 融合结果要明显优于任何单个候选，而不是把字段简单堆在一起。
+- contract 必须写实可执行（pov 具体到人称与视角范围，taboos 能直接约束正文），不要写空话。
+
+严格输出 JSON 对象（不要数组，不要用 Markdown 代码块包裹），字段如下：
+{"title":"书名","genre":"题材标签","logline":"一句话故事（60字内）","sellingPoints":["卖点","卖点","卖点"],"protagonist":"主角设定（核心欲望与阻力）","style":"文风与叙事基调","audience":"目标读者","contract":{"pov":"叙事视角","tone":"语言基调","taboos":["要避免的写法"],"arc":"整体故事弧线"}}`;
   return { system, user };
 }
 

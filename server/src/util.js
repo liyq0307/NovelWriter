@@ -55,6 +55,26 @@ export function parseJSONLoose(text) {
   } catch { return null; }
 }
 
+/**
+ * 容错解析被截断的 JSON 数组：逐个提取完整对象，丢弃末尾残缺项。
+ * 适合「拿到几个算几个」的场景（如候选方向）。
+ */
+export function parseJSONArraySalvage(text) {
+  const t = String(text || '');
+  const out = [];
+  for (let i = 0; i < t.length; i++) {
+    if (t[i] !== '{') continue;
+    const obj = extractJSON(t.slice(i));
+    if (!obj) break;
+    try {
+      const parsed = JSON.parse(obj.replace(/,\s*([}\]])/g, '$1').replace(/[\u201c\u201d]/g, '"'));
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) out.push(parsed);
+    } catch { /* 跳过坏对象 */ }
+    i += obj.length - 1;
+  }
+  return out;
+}
+
 /** SSE 帧 */
 export function sseFrame(event, data) {
   return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;

@@ -7,7 +7,7 @@ import { all, get, run, now, parseField } from '../db.js';
 import { callAI } from '../ai.js';
 import * as P from '../prompts.js';
 import * as M from '../mock.js';
-import { parseJSONLoose, countWords, normalizeText, isSameFact } from '../util.js';
+import { parseJSONLoose, parseJSONArraySalvage, countWords, normalizeText, isSameFact } from '../util.js';
 import { searchProject, dropProjectIndex } from '../search.js';
 
 const r = Router();
@@ -116,12 +116,54 @@ r.post('/:id/directions', async (req, res) => {
       const inner = arr.directions || arr.candidates || arr.data;
       arr = Array.isArray(inner) ? inner : arr.title ? [arr] : null;
     }
+    /* 输出被截断导致 JSON 不完整时，保住已经完整的前几个方向 */
+    if (!Array.isArray(arr) || !arr.length) arr = parseJSONArraySalvage(out.text);
     if (!Array.isArray(arr) || !arr.length) {
       return res.status(502).json({ error: 'AI 返回的方向无法解析，请重试；若反复失败请换用更稳定的模型', raw: out.text.slice(0, 400) });
     }
     res.json(arr.filter((d) => d && d.title).slice(0, 4));
   } catch (e) {
     res.status(502).json({ error: e.message || '方向生成失败' });
+  }
+});
+
+/* ============ AI：融合候选方向 ============ */
+
+r.post('/:id/directions/merge', async (req, res) => {
+  const p = proj(req.params.id);
+  if (!p) return res.status(404).json({ error: '作品不存在' });
+  const raw = Array.isArray(req.body?.candidates) ? req.body.candidates.filter((c) => c && c.title) : [];
+  if (raw.length < 2) return res.status(400).json({ error: '请至少选择两个候选方向再融合' });
+  const candidates = raw.slice(0, 4).map((c) => ({
+    title: String(c.title || '').slice(0, 80),
+    genre: String(c.genre || '').slice(0, 40),
+    logline: String(c.logline || '').slice(0, 200),
+    sellingPoints: Array.isArray(c.sellingPoints) ? c.sellingPoints.map(String).slice(0, 6) : [],
+    protagonist: String(c.protagonist || '').slice(0, 400),
+    style: String(c.style || '').slice(0, 300),
+    audience: String(c.audience || '').slice(0, 120),
+    contract: {
+      pov: String(c.contract?.pov || '').slice(0, 100),
+      tone: String(c.contract?.tone || '').slice(0, 100),
+      taboos: Array.isArray(c.contract?.taboos) ? c.contract.taboos.map(String).slice(0, 8) : [],
+      arc: String(c.contract?.arc || '').slice(0, 300),
+    },
+  }));
+  const note = String(req.body?.note || '').trim().slice(0, 600);
+  const guide = req.body?.guide && typeof req.body.guide === 'object' ? req.body.guide : {};
+  try {
+    const { system, user } = P.directionsMerge(p, candidates, note, guide);
+    const out = await callAI({ task: 'planner', step: 'directions_merge', system, user, projectId: p.id, mock: () => M.directionsMerge(p, candidates, note) });
+    let obj = parseJSONLoose(out.text);
+    /* 兼容模型把结果包成数组或 { direction: {...} } 的情况 */
+    if (Array.isArray(obj)) obj = obj[0];
+    if (obj && !obj.title) obj = obj.direction || obj.data || obj.result || obj.candidate;
+    if (!obj || !obj.title) {
+      return res.status(502).json({ error: 'AI 返回的融合方向无法解析，请重试；若反复失败请换用更稳定的模型', raw: out.text.slice(0, 400) });
+    }
+    res.json(obj);
+  } catch (e) {
+    res.status(502).json({ error: e.message || '方向融合失败' });
   }
 });
 
@@ -294,10 +336,15 @@ r.delete('/:id/characters/:cid', (req, res) => {
 r.post('/:id/relations', (req, res) => {
   const p = proj(req.params.id);
   if (!p) return res.status(404).json({ error: '作品不存在' });
-  const { from = '', to = '', type = '关系', description = '' } = req.body || {};
+  const b = req.body || {};
+  /* 兼容两种入参命名：接口契约用 from/to，表单与导入数据用 from_name/to_name */
+  const from = String(b.from ?? b.from_name ?? '').trim();
+  const to = String(b.to ?? b.to_name ?? '').trim();
   if (!from || !to) return res.status(400).json({ error: '关系需要双方角色名' });
+  const type = String(b.type ?? '').trim() || '关系';
+  const description = String(b.description ?? '');
   const info = run('INSERT INTO relations (project_id, from_name, to_name, type, description) VALUES (?,?,?,?,?)',
-    p.id, from, to, type || '关系', description || '');
+    p.id, from, to, type, description);
   touch(p.id);
   res.json(get('SELECT * FROM relations WHERE id = ?', info.lastInsertRowid));
 });
@@ -314,20 +361,52 @@ r.delete('/:id/relations/:rid', (req, res) => {
 r.post('/:id/outline', async (req, res) => {
   const p = proj(req.params.id);
   if (!p) return res.status(404).json({ error: '作品不存在' });
-  const hasContent = get('SELECT COUNT(*) AS n FROM chapters WHERE project_id = ? AND word_count > 0', p.id).n > 0;
-  if (hasContent) {
-    return res.status(400).json({ error: '已有正文章节：重建卷纲会使章节规划失效。如确需重建，请先删除已写章节，或新建一本作品。' });
+  const chapters = all('SELECT id, word_count, volume_id FROM chapters WHERE project_id = ?', p.id);
+  const written = chapters.filter((c) => c.word_count > 0);
+  /* 已有正文时不允许静默重建：必须由前端明确选择覆盖或跳过 */
+  const mode = String((req.body || {}).mode || '');
+  if (written.length && mode !== 'overwrite' && mode !== 'skip') {
+    return res.status(409).json({
+      error: '当前作品已有正文章节，请先选择处理方式',
+      code: 'HAS_WRITTEN_CHAPTERS',
+      stats: {
+        chapters: chapters.length,
+        written: written.length,
+        words: written.reduce((n, c) => n + c.word_count, 0),
+        volumes: get('SELECT COUNT(*) AS n FROM volumes WHERE project_id = ?', p.id).n,
+      },
+    });
   }
   try {
     const entries = all('SELECT * FROM world_entries WHERE project_id = ?', p.id);
     const chars = all('SELECT * FROM characters WHERE project_id = ?', p.id);
     const { system, user } = P.outline(p, entries, chars);
     const out = await callAI({ task: 'planner', step: 'outline', system, user, projectId: p.id, mock: () => M.outline(p) });
-    const arr = parseJSONLoose(out.text);
+    let arr = parseJSONLoose(out.text);
+    if (!Array.isArray(arr) || !arr.length) arr = parseJSONArraySalvage(out.text);
     if (!Array.isArray(arr) || !arr.length) return res.status(502).json({ error: 'AI 返回的卷纲无法解析，请重试', raw: out.text.slice(0, 300) });
+    const t = now();
+
+    /* 跳过模式：不删除、不改动任何已有卷纲与章节，只把新规划中多出来的卷追加到末尾 */
+    if (mode === 'skip') {
+      const vols = all('SELECT * FROM volumes WHERE project_id = ? ORDER BY idx', p.id);
+      let idx = vols.reduce((m, v) => Math.max(m, v.idx), 0);
+      let added = 0;
+      for (const v of arr.slice(vols.length, 8)) {
+        if (!v?.title) continue;
+        run('INSERT INTO volumes (project_id, idx, title, summary, created_at, updated_at) VALUES (?,?,?,?,?,?)',
+          p.id, ++idx, String(v.title).slice(0, 80), String(v.summary || '').slice(0, 2000), t, t);
+        added++;
+      }
+      touch(p.id);
+      return res.json({
+        volumes: all('SELECT * FROM volumes WHERE project_id = ? ORDER BY idx', p.id),
+        mode: 'skip', addedVolumes: added, preservedChapters: chapters.length,
+      });
+    }
+
     run('DELETE FROM chapters WHERE project_id = ?', p.id);
     run('DELETE FROM volumes WHERE project_id = ?', p.id);
-    const t = now();
     let i = 1;
     for (const v of arr.slice(0, 8)) {
       if (!v?.title) continue;
@@ -335,7 +414,10 @@ r.post('/:id/outline', async (req, res) => {
         p.id, i++, String(v.title).slice(0, 80), String(v.summary || '').slice(0, 2000), t, t);
     }
     run('UPDATE projects SET status = ?, updated_at = ? WHERE id = ?', 'planned', t, p.id);
-    res.json({ volumes: all('SELECT * FROM volumes WHERE project_id = ? ORDER BY idx', p.id) });
+    res.json({
+      volumes: all('SELECT * FROM volumes WHERE project_id = ? ORDER BY idx', p.id),
+      mode: 'overwrite', deletedChapters: chapters.length,
+    });
   } catch (e) {
     res.status(502).json({ error: e.message || '卷纲生成失败' });
   }
@@ -355,20 +437,30 @@ r.post('/:id/volumes/:vid/plan', async (req, res) => {
     const n = p.type === 'short' ? 2 : 8;
     const { system, user } = P.chapterPlan(p, vol, existing, entries, chars, n);
     const out = await callAI({ task: 'planner', step: 'chapter_plan', system, user, projectId: p.id, mock: () => M.chapterPlan(p, vol, existing.length) });
-    const arr = parseJSONLoose(out.text);
+    let arr = parseJSONLoose(out.text);
+    if (!Array.isArray(arr) || !arr.length) arr = parseJSONArraySalvage(out.text);
     if (!Array.isArray(arr) || !arr.length) return res.status(502).json({ error: 'AI 返回的章节任务无法解析，请重试', raw: out.text.slice(0, 300) });
+    const written = all("SELECT id, title, word_count FROM chapters WHERE project_id = ? AND volume_id = ? AND (word_count > 0 OR status <> 'planned')", p.id, vol.id);
+    /* 重新拆章时只替换本卷尚未写正文的「待写」规划；草稿/完成与已写正文一律保留 */
+    const replaced = get("SELECT COUNT(*) AS n FROM chapters WHERE project_id = ? AND volume_id = ? AND word_count = 0 AND status = 'planned'", p.id, vol.id).n;
+    run("DELETE FROM chapters WHERE project_id = ? AND volume_id = ? AND word_count = 0 AND status = 'planned'", p.id, vol.id);
     const max = get('SELECT COALESCE(MAX(idx), 0) AS m FROM chapters WHERE project_id = ?', p.id).m;
     const t = now();
     let idx = max;
+    let inserted = 0;
     const names = new Set(chars.map((c) => c.name));
+    const writtenTitles = new Set(written.map((c) => c.title.trim()));
     for (const c of arr.slice(0, 20)) {
       if (!c?.title) continue;
+      const title = String(c.title).slice(0, 60);
+      if (writtenTitles.has(title.trim())) continue;
       idx++;
+      inserted++;
       const cast = Array.isArray(c.cast) ? c.cast.map(String).filter((n2) => !names.size || names.has(n2)).slice(0, 6) : [];
       run(`INSERT INTO chapters (project_id, volume_id, idx, title, brief, scenes, cast_names, hook, status, content, word_count, created_at, updated_at)
            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         p.id, vol.id, idx,
-        String(c.title).slice(0, 60),
+        title,
         String(c.brief || '').slice(0, 1000),
         String(c.scenes || '').slice(0, 1000),
         JSON.stringify(cast),
@@ -376,10 +468,70 @@ r.post('/:id/volumes/:vid/plan', async (req, res) => {
         'planned', '', 0, t, t);
     }
     touch(p.id);
-    res.json({ chapters: chapterList(p.id) });
+    res.json({ chapters: chapterList(p.id), replaced, planned: inserted, writtenChapters: written.filter((c) => c.word_count > 0).length });
   } catch (e) {
     res.status(502).json({ error: e.message || '拆章失败' });
   }
+});
+
+/* ============ 分卷新增 / 编辑 ============ */
+
+const VOL_TITLE_MAX = 80;
+const VOL_SUMMARY_MAX = 2000;
+
+/** 卷字段校验：卷名必填且限长，简介限长；编辑时未传字段沿用原值 */
+function normalizeVolume(body, base = {}) {
+  const title = String(body.title ?? base.title ?? '').trim();
+  const summary = String(body.summary ?? base.summary ?? '').trim();
+  if (!title) return { error: '卷名不能为空' };
+  if (title.length > VOL_TITLE_MAX) return { error: `卷名不能超过 ${VOL_TITLE_MAX} 个字` };
+  if (summary.length > VOL_SUMMARY_MAX) return { error: `卷简介不能超过 ${VOL_SUMMARY_MAX} 个字` };
+  return { title, summary };
+}
+
+function volumeDetail(p, v) {
+  const chapters = all('SELECT id, idx, title, status, word_count FROM chapters WHERE volume_id = ? ORDER BY idx, id', v.id);
+  return { ...v, chapters, chapterCount: chapters.length };
+}
+
+/* 本地单用户系统没有账号与角色权限体系，访问边界按作品归属校验：跨作品的卷一律视为不存在 */
+r.get('/:id/volumes/:vid', (req, res) => {
+  const p = proj(req.params.id);
+  if (!p) return res.status(404).json({ error: '作品不存在' });
+  const v = get('SELECT * FROM volumes WHERE id = ? AND project_id = ?', Number(req.params.vid), p.id);
+  if (!v) return res.status(404).json({ error: '卷不存在' });
+  res.json(volumeDetail(p, v));
+});
+
+r.post('/:id/volumes', (req, res) => {
+  const p = proj(req.params.id);
+  if (!p) return res.status(404).json({ error: '作品不存在' });
+  const v = normalizeVolume(req.body || {});
+  if (v.error) return res.status(400).json({ error: v.error });
+  if (get('SELECT id FROM volumes WHERE project_id = ? AND title = ?', p.id, v.title)) {
+    return res.status(400).json({ error: '已存在同名卷，请换一个卷名' });
+  }
+  const idx = get('SELECT COALESCE(MAX(idx), 0) AS m FROM volumes WHERE project_id = ?', p.id).m + 1;
+  const t = now();
+  const info = run('INSERT INTO volumes (project_id, idx, title, summary, created_at, updated_at) VALUES (?,?,?,?,?,?)',
+    p.id, idx, v.title, v.summary, t, t);
+  touch(p.id);
+  res.json({ ...volumeDetail(p, get('SELECT * FROM volumes WHERE id = ?', info.lastInsertRowid)), ok: true });
+});
+
+r.put('/:id/volumes/:vid', (req, res) => {
+  const p = proj(req.params.id);
+  if (!p) return res.status(404).json({ error: '作品不存在' });
+  const cur = get('SELECT * FROM volumes WHERE id = ? AND project_id = ?', Number(req.params.vid), p.id);
+  if (!cur) return res.status(404).json({ error: '卷不存在' });
+  const v = normalizeVolume(req.body || {}, cur);
+  if (v.error) return res.status(400).json({ error: v.error });
+  if (get('SELECT id FROM volumes WHERE project_id = ? AND title = ? AND id <> ?', p.id, v.title, cur.id)) {
+    return res.status(400).json({ error: '已存在同名卷，请换一个卷名' });
+  }
+  run('UPDATE volumes SET title = ?, summary = ?, updated_at = ? WHERE id = ?', v.title, v.summary, now(), cur.id);
+  touch(p.id);
+  res.json({ ...volumeDetail(p, get('SELECT * FROM volumes WHERE id = ?', cur.id)), ok: true });
 });
 
 function chapterList(projectId) {
@@ -421,6 +573,9 @@ r.put('/:id/chapters/:cid', (req, res) => {
   const c = get('SELECT * FROM chapters WHERE id = ? AND project_id = ?', Number(req.params.cid), p.id);
   if (!c) return res.status(404).json({ error: '章节不存在' });
   const b = req.body || {};
+  if (b.status !== undefined && !['planned', 'draft', 'done'].includes(b.status)) {
+    return res.status(400).json({ error: '章节状态不合法' });
+  }
   run('UPDATE chapters SET title = ?, brief = ?, scenes = ?, cast_names = ?, hook = ?, status = ?, volume_id = ?, updated_at = ? WHERE id = ?',
     b.title ?? c.title, b.brief ?? c.brief, b.scenes ?? c.scenes,
     b.cast !== undefined ? JSON.stringify(Array.isArray(b.cast) ? b.cast : []) : c.cast_names,

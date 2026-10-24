@@ -122,6 +122,7 @@ export function fmtTokens(n: number): string {
 
 export const STEP_NAMES: Record<string, string> = {
   directions: '开书方向',
+  directions_merge: '方向融合',
   world: '世界设定',
   characters: '角色设计',
   outline: '卷纲规划',
